@@ -356,6 +356,7 @@ do_install() {
     ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
     [ -n "$ip" ] && msg_info "本机地址: http://${ip}:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
     msg_info "部署验证: 浏览器访问 http://<公网地址>:<公网端口>/version 看到版本号即部署成功"
+    msg_info "只能用http://<公网地址>:${REPLY_PORT} 访问, 不能用https://<公网地址>:${REPLY_PORT}/"
 }
 
 # 选项 2: 查看服务运行状态与内存占用
