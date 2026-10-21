@@ -271,15 +271,15 @@ start_services() {
     msg_ok "Nginx 已启动并监听端口 ${REPLY_PORT}"
 }
 
-# 本地连通性验证
+# 本地部署验证 (访问 /version 拿到版本号即视为成功)
 verify_service() {
     sleep 1
-    local code
-    code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 "http://127.0.0.1:${REPLY_PORT}/")"
-    if [ -n "$code" ] && [ "$code" != "000" ]; then
-        msg_ok "连通性验证通过: curl -I http://127.0.0.1:${REPLY_PORT}/ -> HTTP ${code}"
+    local version
+    version="$(curl -s --connect-timeout 5 "http://127.0.0.1:${REPLY_PORT}/version" | tr -d '\r\n')"
+    if [ -n "$version" ]; then
+        msg_ok "部署验证通过: http://127.0.0.1:${REPLY_PORT}/version -> 后端版本 ${version}"
     else
-        msg_warn "连通性验证失败 (HTTP ${code:-无响应}), 可执行 journalctl -u ${SERVICE_NAME} -n 20 与 nginx -t 排查"
+        msg_warn "部署验证失败 (未获取到版本号), 可执行 journalctl -u ${SERVICE_NAME} -n 20 与 nginx -t 排查"
     fi
 }
 
@@ -355,7 +355,7 @@ do_install() {
     local ip
     ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
     [ -n "$ip" ] && msg_info "本机地址: http://${ip}:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
-    msg_info "订阅转换示例: http://<公网地址>:<公网端口>/sub?target=clash&url=<订阅链接>"
+    msg_info "部署验证: 浏览器访问 http://<公网地址>:<公网端口>/version 看到版本号即部署成功"
 }
 
 # 选项 2: 查看服务运行状态与内存占用
@@ -374,6 +374,7 @@ do_status() {
     cur_port="$(get_current_port)"
     cur_domain="$(get_current_domain)"
     [ -n "$cur_port" ] && msg_info "当前反代配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_}"
+    [ -n "$cur_port" ] && msg_info "部署验证: 浏览器访问 http://<公网地址>:${cur_port}/version 看到版本号即部署成功"
     echo ""
     free -m 2>/dev/null | sed -n '1,3p'
 }
