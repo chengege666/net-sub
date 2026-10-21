@@ -1,3 +1,4 @@
+接入vpsx脚本
 # NAT-Subconverter-Nginx 一键交互式部署脚本
 
 针对**小内存（≤512MB）、小硬盘（1~5GB）、无标准 Web 端口的 NAT VPS**，通过纯 Bash 脚本以交互式方式完成 Subconverter 后端及 Nginx 反代的极简部署与生命周期管理。
