@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
 #=============================================================================
-# NAT VPS Subconverter 极简管理脚本 (sub_mgr.sh)
+# NAT VPS 订阅转换后端 极简管理脚本 (sub_mgr.sh)
 #-----------------------------------------------------------------------------
 # 适用系统 : Debian 10/11/12, Ubuntu 20.04/22.04/24.04 (仅限 apt + systemd)
 # 运行环境 : NAT VPS (小内存 / 小硬盘 / 无标准 Web 端口), x86_64 或 aarch64
-# 程序来源 : https://github.com/asdlokj1qpi233/subconverter (最新 release 预编译包)
+# 程序来源 : subconverter - https://github.com/asdlokj1qpi233/subconverter (功能完整)
+#            sub-api      - https://github.com/chengege666/sub-api (极简轻量)
 # 部署方式 : 二进制部署 + Systemd 守护 + Nginx 反代 (严禁 Docker)
 # 使用方法 : sudo bash sub_mgr.sh
 # 注意事项 : 上传到 VPS 时请保持 LF 换行符 (必要时执行 dos2unix sub_mgr.sh)
 #=============================================================================
 
 #--------------------------- 全局配置 ---------------------------#
-REPO="asdlokj1qpi233/subconverter"                          # Subconverter 程序来源仓库
+REPO="asdlokj1qpi233/subconverter"                          # subconverter 程序来源仓库 (功能完整)
+SUBAPI_REPO="chengege666/sub-api"                           # sub-api 程序来源仓库 (极简轻量)
 GH_PROXY=""                                                 # GitHub 加速前缀(可选), 例: https://ghproxy.com/
 INSTALL_DIR="/opt/subconverter"                             # 程序安装目录
+BACKEND_FILE="${INSTALL_DIR}/.backend"                      # 已安装后端标记文件 (subconverter | sub-api)
+BACKEND="subconverter"                                      # 当前操作的后端 (安装向导中交互选择)
 SERVICE_NAME="subconverter"                                 # Systemd 服务名
 SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"  # Systemd 单元文件路径
 NGINX_CONF="/etc/nginx/conf.d/subconverter.conf"            # Nginx 站点配置文件路径
-SUB_INTERNAL_PORT="25500"                                   # Subconverter 内部监听端口
+SUB_INTERNAL_PORT="25500"                                   # 后端内部监听端口 (两种后端统一使用)
 DEFAULT_NAT_PORT="25580"                                    # Nginx 默认 NAT 监听端口
 SWAP_FILE="/swapfile"                                       # 虚拟内存文件路径
 SWAP_SIZE_MB="512"                                          # 虚拟内存大小 (MB)
@@ -53,9 +57,21 @@ has_swap() {
     [ "$(grep -c . /proc/swaps 2>/dev/null)" -gt 1 ]
 }
 
-# 是否已安装本套件 (程序目录 + Nginx 站点配置同时存在)
+# 是否已安装本套件 (任一后端可执行文件 + Nginx 站点配置同时存在)
 is_installed() {
-    [ -x "${INSTALL_DIR}/subconverter" ] && [ -f "${NGINX_CONF}" ]
+    [ -f "$NGINX_CONF" ] || return 1
+    [ -x "${INSTALL_DIR}/subconverter" ] || [ -x "${INSTALL_DIR}/sub-api" ]
+}
+
+# 读取当前已安装的后端类型 (无标记文件的老安装按二进制兼容判断)
+get_backend() {
+    if [ -f "$BACKEND_FILE" ]; then
+        cat "$BACKEND_FILE"
+    elif [ -x "${INSTALL_DIR}/sub-api" ] && [ ! -x "${INSTALL_DIR}/subconverter" ]; then
+        echo "sub-api"
+    else
+        echo "subconverter"
+    fi
 }
 
 #--------------------------- 交互输入 ---------------------------#
@@ -79,7 +95,7 @@ read_port() {
             continue
         fi
         if [ "$input" -eq "$SUB_INTERNAL_PORT" ]; then
-            msg_warn "不能使用 Subconverter 内部端口 ${SUB_INTERNAL_PORT}, 请重新输入"
+            msg_warn "不能使用后端内部端口 ${SUB_INTERNAL_PORT}, 请重新输入"
             continue
         fi
         REPLY_PORT="$input"
@@ -152,13 +168,21 @@ install_deps() {
 
 #--------------------------- 程序下载与部署 ---------------------------#
 download_pkg() {
-    local asset
+    local asset url
     case "$(uname -m)" in
-        x86_64)  asset="subconverter_linux64.tar.gz" ;;
-        aarch64) asset="subconverter_aarch64.tar.gz" ;;
+        x86_64)
+            if [ "$BACKEND" = "sub-api" ]; then asset="sub-api-linux-amd64"; else asset="subconverter_linux64.tar.gz"; fi
+            ;;
+        aarch64)
+            if [ "$BACKEND" = "sub-api" ]; then asset="sub-api-linux-arm64"; else asset="subconverter_aarch64.tar.gz"; fi
+            ;;
         *) die "不支持的 CPU 架构: $(uname -m) (仅支持 x86_64 / aarch64)" ;;
     esac
-    local url="${GH_PROXY}https://github.com/${REPO}/releases/latest/download/${asset}"
+    if [ "$BACKEND" = "sub-api" ]; then
+        url="${GH_PROXY}https://github.com/${SUBAPI_REPO}/releases/latest/download/${asset}"
+    else
+        url="${GH_PROXY}https://github.com/${REPO}/releases/latest/download/${asset}"
+    fi
     msg_info "下载地址: ${url}"
     local i ok=1
     for i in 1 2 3; do
@@ -172,12 +196,30 @@ download_pkg() {
     done
     [ "$ok" -eq 0 ] || die "下载失败, 请检查网络后重试 (网络不佳可在脚本顶部 GH_PROXY 填入加速前缀)"
     [ -s "$TMP_FILE" ] || die "下载的文件为空, 已终止"
-    tar -tzf "$TMP_FILE" >/dev/null 2>&1 || die "压缩包校验失败 (可能下载不完整或已损坏), 已终止"
+    if [ "$BACKEND" = "sub-api" ]; then
+        # sub-api 为裸 ELF 二进制, 校验文件头魔数防止下载到错误页
+        [ "$(head -c 3 "$TMP_FILE" 2>/dev/null)" = $'\x7fEL' ] \
+            || die "二进制文件校验失败 (非 ELF 可执行文件, 可能下载不完整), 已终止"
+    else
+        tar -tzf "$TMP_FILE" >/dev/null 2>&1 || die "压缩包校验失败 (可能下载不完整或已损坏), 已终止"
+    fi
     msg_ok "下载完成 ($(ls -lh "$TMP_FILE" | awk '{print $5}'))"
 }
 
 extract_pkg() {
     rm -rf "$INSTALL_DIR" "$EXTRACT_TMP"
+    mkdir -p "$INSTALL_DIR"
+    # sub-api: 单二进制直接部署, 无需解压
+    if [ "$BACKEND" = "sub-api" ]; then
+        mv "$TMP_FILE" "${INSTALL_DIR}/sub-api" \
+            || die "部署文件到 ${INSTALL_DIR} 失败"
+        chmod +x "${INSTALL_DIR}/sub-api" || die "设置可执行权限失败"
+        echo "sub-api" > "$BACKEND_FILE" || die "写入后端标记文件失败"
+        [ -x "${INSTALL_DIR}/sub-api" ] || die "部署后未检测到可执行文件 ${INSTALL_DIR}/sub-api"
+        msg_ok "已部署到 ${INSTALL_DIR} (后端: sub-api), 临时文件已清理"
+        return 0
+    fi
+    # subconverter: tar.gz 解压部署
     mkdir -p "$EXTRACT_TMP"
     tar -xzf "$TMP_FILE" -C "$EXTRACT_TMP" \
         || { rm -rf "$EXTRACT_TMP"; die "解压失败, 压缩包可能已损坏"; }
@@ -188,20 +230,41 @@ extract_pkg() {
         die "压缩包内未找到 subconverter 主程序, 已终止"
     fi
     bindir="$(dirname "$bin")"
-    mkdir -p "$INSTALL_DIR"
     cp -a "$bindir/." "$INSTALL_DIR/" \
         || { rm -rf "$EXTRACT_TMP"; die "部署文件到 ${INSTALL_DIR} 失败"; }
     rm -rf "$EXTRACT_TMP"
     chmod +x "${INSTALL_DIR}/subconverter"
     rm -f "$TMP_FILE"   # 解压后立即删除临时压缩包
+    echo "subconverter" > "$BACKEND_FILE" || die "写入后端标记文件失败"
     [ -x "${INSTALL_DIR}/subconverter" ] || die "部署后未检测到可执行文件 ${INSTALL_DIR}/subconverter"
-    msg_ok "已部署到 ${INSTALL_DIR}, 临时文件已清理"
+    msg_ok "已部署到 ${INSTALL_DIR} (后端: subconverter), 临时文件已清理"
 }
 
 #--------------------------- 配置文件 ---------------------------#
-# Systemd 单元文件
+# Systemd 单元文件 (按后端生成, sub-api 通过环境变量监听统一内部端口)
 write_systemd_unit() {
-    cat > "$SYSTEMD_UNIT" <<'EOF'
+    if [ "$BACKEND" = "sub-api" ]; then
+        cat > "$SYSTEMD_UNIT" <<'EOF'
+[Unit]
+Description=sub-api Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/subconverter
+ExecStart=/opt/subconverter/sub-api
+Environment="LISTEN_ADDR=127.0.0.1:25500"
+Environment="GOMEMLIMIT=32MiB"
+MemoryMax=64M
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    else
+        cat > "$SYSTEMD_UNIT" <<'EOF'
 [Unit]
 Description=Subconverter Service
 After=network.target
@@ -217,6 +280,7 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOF
+    fi
 }
 
 # Nginx 站点配置 (引用全局 REPLY_PORT / REPLY_DOMAIN)
@@ -263,23 +327,32 @@ start_services() {
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
     systemctl restart "$SERVICE_NAME" \
-        || die "subconverter 服务启动失败, 可执行: journalctl -u ${SERVICE_NAME} -n 20 排查"
-    msg_ok "subconverter 服务已启动 (异常自动拉起: Restart=always)"
+        || die "后端服务启动失败, 可执行: journalctl -u ${SERVICE_NAME} -n 20 排查"
+    msg_ok "后端服务已启动 (异常自动拉起: Restart=always)"
     nginx -t || die "Nginx 配置语法检查失败, 已终止"
     systemctl enable nginx >/dev/null 2>&1
     systemctl restart nginx || die "Nginx 启动失败"
     msg_ok "Nginx 已启动并监听端口 ${REPLY_PORT}"
 }
 
-# 本地部署验证 (访问 /version 拿到版本号即视为成功)
+# 本地部署验证 (subconverter 验 /version 返回版本号, sub-api 验 /healthz 返回 ok)
 verify_service() {
     sleep 1
-    local version
-    version="$(curl -s --connect-timeout 5 "http://127.0.0.1:${REPLY_PORT}/version" | tr -d '\r\n')"
-    if [ -n "$version" ]; then
-        msg_ok "部署验证通过: http://127.0.0.1:${REPLY_PORT}/version -> 后端版本 ${version}"
+    local result
+    if [ "$(get_backend)" = "sub-api" ]; then
+        result="$(curl -s --connect-timeout 5 "http://127.0.0.1:${REPLY_PORT}/healthz" | tr -d '\r\n')"
+        if [ "$result" = "ok" ]; then
+            msg_ok "部署验证通过: http://127.0.0.1:${REPLY_PORT}/healthz -> ${result}"
+        else
+            msg_warn "部署验证失败 (未返回 ok), 可执行 journalctl -u ${SERVICE_NAME} -n 20 与 nginx -t 排查"
+        fi
     else
-        msg_warn "部署验证失败 (未获取到版本号), 可执行 journalctl -u ${SERVICE_NAME} -n 20 与 nginx -t 排查"
+        result="$(curl -s --connect-timeout 5 "http://127.0.0.1:${REPLY_PORT}/version" | tr -d '\r\n')"
+        if [ -n "$result" ]; then
+            msg_ok "部署验证通过: http://127.0.0.1:${REPLY_PORT}/version -> 后端版本 ${result}"
+        else
+            msg_warn "部署验证失败 (未获取到版本号), 可执行 journalctl -u ${SERVICE_NAME} -n 20 与 nginx -t 排查"
+        fi
     fi
 }
 
@@ -293,11 +366,11 @@ svc_action() {
         *) msg_warn "未知操作: $action"; return 1 ;;
     esac
     if [ "$action" = "stop" ]; then
-        systemctl stop "$SERVICE_NAME" 2>/dev/null || { msg_err "subconverter 停止失败"; rc=1; }
+        systemctl stop "$SERVICE_NAME" 2>/dev/null || { msg_err "后端服务停止失败"; rc=1; }
         systemctl stop nginx 2>/dev/null           || { msg_err "nginx 停止失败"; rc=1; }
     else
         systemctl "$action" "$SERVICE_NAME" \
-            || { msg_err "subconverter ${cn}失败, 可执行: journalctl -u ${SERVICE_NAME} -n 20 排查"; rc=1; }
+            || { msg_err "后端服务${cn}失败, 可执行: journalctl -u ${SERVICE_NAME} -n 20 排查"; rc=1; }
         if nginx -t >/dev/null 2>&1; then
             systemctl "$action" nginx || { msg_err "nginx ${cn}失败"; rc=1; }
         else
@@ -305,7 +378,7 @@ svc_action() {
             rc=1
         fi
     fi
-    [ "$rc" -eq 0 ] && msg_ok "已${cn}所有服务 (Subconverter + Nginx)"
+    [ "$rc" -eq 0 ] && msg_ok "已${cn}所有服务 (后端 + Nginx)"
     return "$rc"
 }
 
@@ -314,9 +387,9 @@ svc_action() {
 do_install() {
     echo ""
     echo "=================================================="
-    echo "          Subconverter 安装向导 (NAT VPS 版)"
+    echo "        订阅转换后端 安装向导 (NAT VPS 版)"
     echo "=================================================="
-    local mem disk_free cur_port cur_domain go=""
+    local mem disk_free cur_port cur_domain cur_backend b_default b_choice go=""
     mem="$(get_total_mem_mb)"
     disk_free="$(get_disk_free_mb)"
     msg_info "系统预检: 物理内存 ${mem}MB / 磁盘剩余 ${disk_free}MB / 架构 $(uname -m)"
@@ -332,17 +405,33 @@ do_install() {
     cur_port="$(get_current_port)";     [ -z "$cur_port" ]   && cur_port="$DEFAULT_NAT_PORT"
     cur_domain="$(get_current_domain)"; [ -z "$cur_domain" ] && cur_domain="_"
     echo ""
+    echo "--------------------------------------------------"
+    echo " 请选择订阅转换后端:"
+    echo "   1. subconverter (功能完整: 全客户端格式/规则模板, 内存约 20-30MB)"
+    echo "   2. sub-api      (极简轻量: mihomo/singbox/base64, 空闲内存 < 10MB)"
+    echo "--------------------------------------------------"
+    cur_backend="$(get_backend)"
+    b_default="1"; [ "$cur_backend" = "sub-api" ] && b_default="2"
+    read -r -p "后端选项 [1/2] (回车默认: ${b_default}): " b_choice
+    [ -z "$b_choice" ] && b_choice="$b_default"
+    case "$b_choice" in
+        1) BACKEND="subconverter" ;;
+        2) BACKEND="sub-api" ;;
+        *) msg_warn "无效输入, 已按当前/默认后端 [${cur_backend}] 处理"; BACKEND="$cur_backend" ;;
+    esac
+    msg_info "已选择后端: ${BACKEND}"
+    echo ""
     msg_info "请输入 Nginx 本地监听端口 (请填入 NAT 服务商映射给您的内网端口)"
     read_port "监听端口" "$cur_port"
     read_domain "请输入反代绑定的域名 (若仅通过 IP:端口 访问请直接回车)" "$cur_domain"
     echo ""
-    msg_info "安装参数: 端口=${REPLY_PORT} / 域名=${REPLY_DOMAIN} / 内部端口=${SUB_INTERNAL_PORT}"
+    msg_info "安装参数: 后端=${BACKEND} / 端口=${REPLY_PORT} / 域名=${REPLY_DOMAIN} / 内部端口=${SUB_INTERNAL_PORT}"
     echo ""
     msg_info "[1/5] 安装系统依赖 (curl wget tar nginx)..."
     install_deps
-    msg_info "[2/5] 下载 Subconverter 程序 ($(uname -m))..."
+    msg_info "[2/5] 下载 ${BACKEND} 程序 ($(uname -m))..."
     download_pkg
-    msg_info "[3/5] 解压部署到 ${INSTALL_DIR}..."
+    msg_info "[3/5] 部署程序到 ${INSTALL_DIR}..."
     extract_pkg
     msg_info "[4/5] 写入 Systemd 服务配置..."
     write_systemd_unit
@@ -355,7 +444,11 @@ do_install() {
     local ip
     ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
     [ -n "$ip" ] && msg_info "本机地址: http://${ip}:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
-    msg_info "部署验证: 浏览器访问 http://<公网地址>:<公网端口>/version 看到版本号即部署成功"
+    if [ "$(get_backend)" = "sub-api" ]; then
+        msg_info "部署验证: 浏览器访问 http://<公网地址>:<公网端口>/healthz 返回 ok 即部署成功"
+    else
+        msg_info "部署验证: 浏览器访问 http://<公网地址>:<公网端口>/version 看到版本号即部署成功"
+    fi
     msg_info "只能用http://<公网地址>:${REPLY_PORT} 访问, 不能用https://<公网地址>:${REPLY_PORT}/"
 }
 
@@ -374,9 +467,15 @@ do_status() {
     local cur_port cur_domain
     cur_port="$(get_current_port)"
     cur_domain="$(get_current_domain)"
-    [ -n "$cur_port" ] && msg_info "当前反代配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_}"
-    [ -n "$cur_port" ] && msg_info "部署验证: 浏览器访问 http://<公网地址>:${cur_port}/version 看到版本号即部署成功"
-    [ -n "$cur_port" ] && msg_info "只能用http://<公网地址>:${cur_port} 访问, 不能用https://<公网地址>:${cur_port}/"
+    [ -n "$cur_port" ] && msg_info "当前配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_} / 后端 $(get_backend)"
+    if [ -n "$cur_port" ]; then
+        if [ "$(get_backend)" = "sub-api" ]; then
+            msg_info "部署验证: 浏览器访问 http://<公网地址>:${cur_port}/healthz 返回 ok 即部署成功"
+        else
+            msg_info "部署验证: 浏览器访问 http://<公网地址>:${cur_port}/version 看到版本号即部署成功"
+        fi
+        msg_info "只能用http://<公网地址>:${cur_port} 访问, 不能用https://<公网地址>:${cur_port}/"
+    fi
     echo ""
     free -m 2>/dev/null | sed -n '1,3p'
 }
@@ -451,52 +550,73 @@ _update_rollback() {
     fi
 }
 
-# 选项 8: 更新 Subconverter 程序 (仅替换程序本体, 端口/域名等配置不动)
+# 选项 8: 更新后端程序 (仅更新当前已安装的后端, 端口/域名等配置不动)
 do_update() {
     if ! is_installed; then
         msg_err "尚未安装本套件, 请先执行安装 (选项 1)"
         return 1
     fi
-    local old_ver new_ver bin bindir ans
-    old_ver="$(curl -s --connect-timeout 3 "http://127.0.0.1:${SUB_INTERNAL_PORT}/version" | tr -d '\r\n')"
+    BACKEND="$(get_backend)"
+    local old_ver new_ver bin bindir ans deploy_ok=1
+    if [ "$BACKEND" = "sub-api" ]; then
+        old_ver="$(curl -s --connect-timeout 3 "http://127.0.0.1:${SUB_INTERNAL_PORT}/healthz" | tr -d '\r\n')"
+    else
+        old_ver="$(curl -s --connect-timeout 3 "http://127.0.0.1:${SUB_INTERNAL_PORT}/version" | tr -d '\r\n')"
+    fi
     echo ""
-    msg_info "当前版本: ${old_ver:-无法获取 (服务未运行?)}"
+    msg_info "当前后端: ${BACKEND} / 当前状态: ${old_ver:-无法获取 (服务未运行?)}"
     read -r -p "下载最新版并替换程序? (端口/域名等配置不变, 服务将中断约 2-3 秒) [y/N]: " ans
     case "$ans" in
         y|Y|yes|YES) ;;
         *) msg_info "已取消更新"; return 1 ;;
     esac
-    msg_info "[1/4] 下载最新 Subconverter 程序包 ($(uname -m))..."
+    msg_info "[1/4] 下载最新 ${BACKEND} 程序 ($(uname -m))..."
     download_pkg
-    msg_info "[2/4] 解压到临时目录..."
-    rm -rf "$EXTRACT_TMP"
-    mkdir -p "$EXTRACT_TMP"
-    tar -xzf "$TMP_FILE" -C "$EXTRACT_TMP" \
-        || { rm -rf "$EXTRACT_TMP"; die "解压失败, 压缩包可能已损坏"; }
-    bin="$(find "$EXTRACT_TMP" -type f -name subconverter | head -n 1)"
-    if [ -z "$bin" ]; then
+    if [ "$BACKEND" = "sub-api" ]; then
+        msg_info "[2/4] 单二进制无需解压, 准备部署..."
+    else
+        msg_info "[2/4] 解压到临时目录..."
         rm -rf "$EXTRACT_TMP"
-        die "压缩包内未找到 subconverter 主程序, 已终止"
+        mkdir -p "$EXTRACT_TMP"
+        tar -xzf "$TMP_FILE" -C "$EXTRACT_TMP" \
+            || { rm -rf "$EXTRACT_TMP"; die "解压失败, 压缩包可能已损坏"; }
+        bin="$(find "$EXTRACT_TMP" -type f -name subconverter | head -n 1)"
+        if [ -z "$bin" ]; then
+            rm -rf "$EXTRACT_TMP"
+            die "压缩包内未找到 subconverter 主程序, 已终止"
+        fi
+        bindir="$(dirname "$bin")"
     fi
-    bindir="$(dirname "$bin")"
     msg_info "[3/4] 备份旧程序并替换文件..."
     systemctl stop "$SERVICE_NAME"
     rm -rf "${INSTALL_DIR}.bak"
     mv "$INSTALL_DIR" "${INSTALL_DIR}.bak" \
         || { systemctl start "$SERVICE_NAME"; rm -rf "$EXTRACT_TMP"; die "备份旧程序失败, 已取消更新"; }
-    if mkdir -p "$INSTALL_DIR" && cp -a "$bindir/." "$INSTALL_DIR/" \
-        && chmod +x "${INSTALL_DIR}/subconverter" \
-        && systemctl start "$SERVICE_NAME" 2>/dev/null; then
+    mkdir -p "$INSTALL_DIR"
+    if [ "$BACKEND" = "sub-api" ]; then
+        mv "$TMP_FILE" "${INSTALL_DIR}/sub-api" \
+            && chmod +x "${INSTALL_DIR}/sub-api" \
+            && echo "sub-api" > "$BACKEND_FILE" && deploy_ok=0
+    else
+        cp -a "$bindir/." "$INSTALL_DIR/" \
+            && chmod +x "${INSTALL_DIR}/subconverter" \
+            && echo "subconverter" > "$BACKEND_FILE" && deploy_ok=0
+    fi
+    if [ "$deploy_ok" -eq 0 ] && systemctl start "$SERVICE_NAME" 2>/dev/null; then
         rm -rf "$EXTRACT_TMP"
         sleep 1
-        new_ver="$(curl -s --connect-timeout 5 "http://127.0.0.1:${SUB_INTERNAL_PORT}/version" | tr -d '\r\n')"
+        if [ "$BACKEND" = "sub-api" ]; then
+            new_ver="$(curl -s --connect-timeout 5 "http://127.0.0.1:${SUB_INTERNAL_PORT}/healthz" | tr -d '\r\n')"
+        else
+            new_ver="$(curl -s --connect-timeout 5 "http://127.0.0.1:${SUB_INTERNAL_PORT}/version" | tr -d '\r\n')"
+        fi
         if [ -n "$new_ver" ]; then
             rm -rf "${INSTALL_DIR}.bak"
             rm -f "$TMP_FILE"
             msg_ok "更新完成: ${old_ver:-未知} -> ${new_ver}"
-            [ "$old_ver" = "$new_ver" ] && msg_info "版本号未变化, 可能已是最新版本"
+            [ "$BACKEND" != "sub-api" ] && [ "$old_ver" = "$new_ver" ] && msg_info "版本号未变化, 可能已是最新版本"
         else
-            msg_err "新版本验证失败 (未获取到版本号), 正在回滚..."
+            msg_err "新版本验证失败 (服务无预期响应), 正在回滚..."
             _update_rollback
             return 1
         fi
@@ -511,16 +631,16 @@ do_update() {
 show_menu() {
     echo ""
     echo "=================================================="
-    echo "        NAT VPS Subconverter 极简管理脚本"
+    echo "      NAT VPS 订阅转换后端 极简管理脚本"
     echo "=================================================="
-    echo " 1. 全新安装 / 覆盖安装"
+    echo " 1. 全新安装 / 覆盖安装 (可选 subconverter / sub-api)"
     echo " 2. 查看服务运行状态与内存占用"
-    echo " 3. 启动所有服务 (Subconverter + Nginx)"
+    echo " 3. 启动所有服务 (后端 + Nginx)"
     echo " 4. 停止所有服务"
     echo " 5. 重启所有服务"
     echo " 6. 修改配置 (NAT监听端口 / 绑定域名)"
     echo " 7. 一键完全卸载 (清理所有文件与配置)"
-    echo " 8. 更新 Subconverter 程序"
+    echo " 8. 更新后端程序 (仅更新当前已安装的后端)"
     echo " 0. 退出脚本"
     echo "=================================================="
 }
