@@ -59,6 +59,7 @@ wget -qO sub_mgr.sh https://ghfast.top/https://raw.githubusercontent.com/chengeg
  5. 重启所有服务
  6. 修改配置 (NAT监听端口 / 绑定域名)
  7. 一键完全卸载 (清理所有文件与配置)
+ 8. 更新 Subconverter 程序
  0. 退出脚本
 ==================================================
 ```

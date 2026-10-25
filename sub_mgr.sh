@@ -435,6 +435,78 @@ do_uninstall() {
     msg_ok "卸载完成, 相关文件与配置已彻底清理 (nginx 软件包已保留, 如需删除请执行: apt-get purge nginx)"
 }
 
+# 更新失败回滚: 恢复备份的旧程序并启动
+_update_rollback() {
+    systemctl stop "$SERVICE_NAME" 2>/dev/null
+    rm -rf "$INSTALL_DIR" "$EXTRACT_TMP"
+    if [ -d "${INSTALL_DIR}.bak" ]; then
+        mv "${INSTALL_DIR}.bak" "$INSTALL_DIR"
+        if systemctl start "$SERVICE_NAME" 2>/dev/null; then
+            msg_ok "已回滚到旧版本, 服务已恢复"
+        else
+            msg_err "已回滚旧程序但服务启动失败, 请执行: journalctl -u ${SERVICE_NAME} -n 20 排查"
+        fi
+    else
+        msg_err "备份目录不存在, 无法自动回滚"
+    fi
+}
+
+# 选项 8: 更新 Subconverter 程序 (仅替换程序本体, 端口/域名等配置不动)
+do_update() {
+    if ! is_installed; then
+        msg_err "尚未安装本套件, 请先执行安装 (选项 1)"
+        return 1
+    fi
+    local old_ver new_ver bin bindir ans
+    old_ver="$(curl -s --connect-timeout 3 "http://127.0.0.1:${SUB_INTERNAL_PORT}/version" | tr -d '\r\n')"
+    echo ""
+    msg_info "当前版本: ${old_ver:-无法获取 (服务未运行?)}"
+    read -r -p "下载最新版并替换程序? (端口/域名等配置不变, 服务将中断约 2-3 秒) [y/N]: " ans
+    case "$ans" in
+        y|Y|yes|YES) ;;
+        *) msg_info "已取消更新"; return 1 ;;
+    esac
+    msg_info "[1/4] 下载最新 Subconverter 程序包 ($(uname -m))..."
+    download_pkg
+    msg_info "[2/4] 解压到临时目录..."
+    rm -rf "$EXTRACT_TMP"
+    mkdir -p "$EXTRACT_TMP"
+    tar -xzf "$TMP_FILE" -C "$EXTRACT_TMP" \
+        || { rm -rf "$EXTRACT_TMP"; die "解压失败, 压缩包可能已损坏"; }
+    bin="$(find "$EXTRACT_TMP" -type f -name subconverter | head -n 1)"
+    if [ -z "$bin" ]; then
+        rm -rf "$EXTRACT_TMP"
+        die "压缩包内未找到 subconverter 主程序, 已终止"
+    fi
+    bindir="$(dirname "$bin")"
+    msg_info "[3/4] 备份旧程序并替换文件..."
+    systemctl stop "$SERVICE_NAME"
+    rm -rf "${INSTALL_DIR}.bak"
+    mv "$INSTALL_DIR" "${INSTALL_DIR}.bak" \
+        || { systemctl start "$SERVICE_NAME"; rm -rf "$EXTRACT_TMP"; die "备份旧程序失败, 已取消更新"; }
+    if mkdir -p "$INSTALL_DIR" && cp -a "$bindir/." "$INSTALL_DIR/" \
+        && chmod +x "${INSTALL_DIR}/subconverter" \
+        && systemctl start "$SERVICE_NAME" 2>/dev/null; then
+        rm -rf "$EXTRACT_TMP"
+        sleep 1
+        new_ver="$(curl -s --connect-timeout 5 "http://127.0.0.1:${SUB_INTERNAL_PORT}/version" | tr -d '\r\n')"
+        if [ -n "$new_ver" ]; then
+            rm -rf "${INSTALL_DIR}.bak"
+            rm -f "$TMP_FILE"
+            msg_ok "更新完成: ${old_ver:-未知} -> ${new_ver}"
+            [ "$old_ver" = "$new_ver" ] && msg_info "版本号未变化, 可能已是最新版本"
+        else
+            msg_err "新版本验证失败 (未获取到版本号), 正在回滚..."
+            _update_rollback
+            return 1
+        fi
+    else
+        msg_err "新版本部署或启动失败, 正在回滚..."
+        _update_rollback
+        return 1
+    fi
+}
+
 #--------------------------- 主菜单 ---------------------------#
 show_menu() {
     echo ""
@@ -448,6 +520,7 @@ show_menu() {
     echo " 5. 重启所有服务"
     echo " 6. 修改配置 (NAT监听端口 / 绑定域名)"
     echo " 7. 一键完全卸载 (清理所有文件与配置)"
+    echo " 8. 更新 Subconverter 程序"
     echo " 0. 退出脚本"
     echo "=================================================="
 }
@@ -462,7 +535,7 @@ main() {
     while :; do
         show_menu
         local choice=""
-        read -r -p "请输入选项编号 [0-7]: " choice
+        read -r -p "请输入选项编号 [0-8]: " choice
         case "$choice" in
             1) do_install ;;
             2) do_status ;;
@@ -471,8 +544,9 @@ main() {
             5) svc_action restart ;;
             6) do_modify ;;
             7) do_uninstall ;;
+            8) do_update ;;
             0) msg_info "再见"; exit 0 ;;
-            *) msg_warn "无效选项, 请输入 0-7" ;;
+            *) msg_warn "无效选项, 请输入 0-8" ;;
         esac
         echo ""
         read -r -p "按回车键返回主菜单..." _
