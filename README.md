@@ -8,12 +8,9 @@ journalctl -u subconverter -f
 
 # NAT-Subconverter-Nginx 一键交互式部署脚本
 
-针对**小内存（≤512MB）、小硬盘（1~5GB）、无标准 Web 端口的 NAT VPS**，通过纯 Bash 脚本以交互式方式完成订阅转换后端及 Nginx 反代的极简部署与生命周期管理。
+针对**小内存（≤512MB）、小硬盘（1~5GB）、无标准 Web 端口的 NAT VPS**，通过纯 Bash 脚本以交互式方式完成 Subconverter 后端及 Nginx 反代的极简部署与生命周期管理。
 
-> 后端来源（安装时二选一）：
-> - [asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter)：功能完整（全客户端格式 / 规则模板，支持 anytls / mieru / hy2 / hy / vless），空闲内存约 20-30MB
-> - [chengege666/sub-api](https://github.com/chengege666/sub-api)：极简轻量（仅输出 mihomo / singbox / base64），空闲内存 < 10MB
->
+> 程序来源：[asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter)（支持 anytls / mieru / hy2 / hy / vless）
 > 部署方式：二进制部署 + Systemd 守护 + Nginx 反代，**全程不依赖 Docker**
 
 ---
@@ -45,7 +42,7 @@ wget -qO sub_mgr.sh https://ghfast.top/https://raw.githubusercontent.com/chengeg
 | CPU 架构 | x86_64 (amd64) 与 aarch64 (arm64) 自动识别 |
 | 网络环境 | NAT IPv4（无公网 80/443，仅映射内网指定端口至公网） |
 
-资源占用：安装后新增磁盘 ≤ 60MB；空闲内存 subconverter ≤ 30MB（选 sub-api 则 < 10MB）+ Nginx ≤ 10MB。
+资源占用：安装后新增磁盘 ≤ 60MB；空闲内存 Subconverter ≤ 30MB + Nginx ≤ 10MB。
 
 ---
 
@@ -53,16 +50,16 @@ wget -qO sub_mgr.sh https://ghfast.top/https://raw.githubusercontent.com/chengeg
 
 ```
 ==================================================
-      NAT VPS 订阅转换后端 极简管理脚本
+        NAT VPS Subconverter 极简管理脚本
 ==================================================
- 1. 全新安装 / 覆盖安装 (可选 subconverter / sub-api)
+ 1. 全新安装 / 覆盖安装
  2. 查看服务运行状态与内存占用
- 3. 启动所有服务 (后端 + Nginx)
+ 3. 启动所有服务 (Subconverter + Nginx)
  4. 停止所有服务
  5. 重启所有服务
  6. 修改配置 (NAT监听端口 / 绑定域名)
  7. 一键完全卸载 (清理所有文件与配置)
- 8. 更新后端程序 (仅更新当前已安装的后端)
+ 8. 更新 Subconverter 程序
  0. 退出脚本
 ==================================================
 ```
@@ -75,17 +72,16 @@ wget -qO sub_mgr.sh https://ghfast.top/https://raw.githubusercontent.com/chengeg
 | 步骤 | 说明 | 默认值 |
 |---|---|---|
 | 创建 Swap | 物理内存 ≤ 256MB 且无 Swap 时提示，防 OOM 崩溃 | Y（创建 512MB） |
-| 选择后端 | 1=subconverter 功能完整 / 2=sub-api 极简轻量；覆盖安装时回车保持当前后端 | 1 |
 | NAT 监听端口 | 填写 **NAT 服务商映射给您的内网端口**，禁止使用 25500 | 25580 |
 | 绑定域名 | 仅通过 `IP:端口` 访问直接回车 | `_` |
 
 安装内容：
 
 1. 仅安装 `curl wget tar nginx`，完成后立即清理 apt 缓存防爆盘；
-2. 按 CPU 架构下载所选后端的预编译程序（subconverter 为 tar.gz 包 / sub-api 为单二进制，3 次重试 + 完整性校验），部署至 `/opt/subconverter` 并立即删除安装包；
-3. 写入 Systemd 服务（`Restart=always`，异常 5 秒自动拉起；sub-api 额外设置 `GOMEMLIMIT=32MiB` 与 `MemoryMax=64M` 压低内存水位）；
+2. 按 CPU 架构下载 Subconverter 预编译包（3 次重试 + 完整性校验），解压至 `/opt/subconverter` 并立即删除安装包；
+3. 写入 Systemd 服务（`Restart=always`，异常 5 秒自动拉起）；
 4. 写入 Nginx 反代（关闭 access_log、error 级别 crit、请求体限制 10M），`nginx -t` 通过后启动；
-5. 自动执行本地连通性验证（subconverter 验 `/version`，sub-api 验 `/healthz`）。
+5. 自动执行 `curl -I` 本地连通性验证。
 
 ## 使用示例
 
@@ -94,8 +90,6 @@ wget -qO sub_mgr.sh https://ghfast.top/https://raw.githubusercontent.com/chengeg
 ```
 http://<公网地址>:<公网端口>/sub?target=clash&url=<订阅链接>
 ```
-
-> sub-api 后端支持 `target=mihomo`（别名 `clash`）/ `singbox` / `base64`；subconverter 后端支持全量 target 与规则模板参数。
 
 对外访问请使用 **NAT 服务商映射的公网地址和公网端口**，脚本内端口填的是映射的内网端口。
 
@@ -113,7 +107,7 @@ nginx -t                          # Nginx 配置语法检查
 
 | 路径 | 说明 |
 |---|---|
-| `/opt/subconverter/` | 后端程序目录（含 `.backend` 后端类型标记文件） |
+| `/opt/subconverter/` | Subconverter 程序目录 |
 | `/etc/systemd/system/subconverter.service` | Systemd 服务单元 |
 | `/etc/nginx/conf.d/subconverter.conf` | Nginx 站点配置（端口/域名在此） |
 | `/var/log/nginx/sub_error.log` | Nginx 错误日志（仅记录 crit 级别） |
