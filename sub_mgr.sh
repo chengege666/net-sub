@@ -430,14 +430,15 @@ do_install() {
     verify_service
     echo ""
     msg_ok "部署完成!"
-    local ip
-    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    [ -n "$ip" ] && msg_info "本机地址: ${scheme}://${ip}:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
-    msg_info "部署验证: 浏览器访问 ${scheme}://<公网地址>:<公网端口>/version 看到版本号即部署成功"
     if [ -n "$REPLY_CERT" ]; then
-        msg_info "HTTPS 已启用: 请使用 https://<域名>:<公网端口>/ 访问 (同端口 HTTP 已不可用)"
-        msg_info "证书续期后需执行 systemctl reload nginx, 建议在 acme.sh 侧配置 --reloadcmd 自动重载"
+        msg_info "访问地址: https://${REPLY_DOMAIN}:<公网端口>/ (公网端口为 NAT 服务商映射的端口)"
+        msg_info "部署验证: 浏览器访问 https://${REPLY_DOMAIN}:<公网端口>/version 看到版本号即部署成功"
+        msg_info "同端口 HTTP 已不可用; 证书续期后执行 systemctl reload nginx (或配置 acme.sh --reloadcmd)"
     else
+        local ip
+        ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        [ -n "$ip" ] && msg_info "本机地址: http://${ip}:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
+        msg_info "部署验证: 浏览器访问 http://<公网地址>:<公网端口>/version 看到版本号即部署成功"
         msg_info "当前为纯 HTTP 访问, 如需 HTTPS 请运行本脚本选 6 填入证书路径"
     fi
 }
@@ -461,8 +462,8 @@ do_status() {
     if [ -n "$cur_cert" ]; then
         [ -n "$cur_port" ] && msg_info "当前反代配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_} / HTTPS=启用"
         [ -n "$cur_port" ] && msg_info "证书完整链: ${cur_cert} (续期后请执行 systemctl reload nginx)"
-        [ -n "$cur_port" ] && msg_info "部署验证: 浏览器访问 https://<公网地址>:${cur_port}/version 看到版本号即部署成功"
-        [ -n "$cur_port" ] && msg_info "HTTPS 已启用, 同端口 HTTP 访问已不可用"
+        [ -n "$cur_port" ] && msg_info "访问地址: https://${cur_domain}:<公网端口>/ (公网端口为 NAT 服务商映射的端口)"
+        [ -n "$cur_port" ] && msg_info "部署验证: 浏览器访问 https://${cur_domain}:<公网端口>/version 看到版本号即部署成功 (同端口 HTTP 已不可用)"
     else
         [ -n "$cur_port" ] && msg_info "当前反代配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_} / HTTPS=未启用"
         [ -n "$cur_port" ] && msg_info "部署验证: 浏览器访问 http://<公网地址>:${cur_port}/version 看到版本号即部署成功"
