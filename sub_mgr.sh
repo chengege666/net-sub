@@ -454,7 +454,7 @@ do_install() {
     echo ""
     msg_info "请输入 Nginx 本地监听端口 (请填入 NAT 服务商映射给您的内网端口)"
     read_port "监听端口" "$cur_port"
-    read_public_port "NAT 服务商分配的公网端口" "$cur_public"
+    read_public_port "NAT 公网端口 (与监听端口一致请直接回车)" "${cur_public:-$REPLY_PORT}"
     read_domain "请输入反代绑定的域名 (若仅通过 IP:端口 访问请直接回车)" "$cur_domain"
     read_cert_paths "$cur_cert" "$cur_key"
     echo ""
@@ -540,7 +540,7 @@ do_modify() {
     fi
     echo ""
     read_port "新监听端口 (回车保持当前值)" "$cur_port"
-    read_public_port "新公网映射端口 (回车保持当前值)" "$cur_public"
+    read_public_port "新公网端口 (与监听端口一致请直接回车)" "${cur_public:-$REPLY_PORT}"
     read_domain "新绑定域名 (回车保持当前值)" "${cur_domain:-_}"
     read_cert_paths "$cur_cert" "$cur_key"
     cp "$NGINX_CONF" "${NGINX_CONF}.bak" || die "备份原配置失败"
