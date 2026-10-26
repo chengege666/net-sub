@@ -59,11 +59,17 @@ is_installed() {
 }
 
 #--------------------------- 交互输入 ---------------------------#
-# 端口输入: $1=提示语 $2=默认值, 校验通过后写入全局变量 REPLY_PORT
+# 端口输入: $1=提示语 $2=默认值(可为空), 校验通过后写入全局变量 REPLY_PORT
+# 默认值仅在历史配置存在时提供; 无历史记录时强制手动输入
 read_port() {
-    local prompt="$1" default="$2" input
+    local prompt="$1" default="$2" input disp
+    if [ -n "$default" ]; then
+        disp="[${default}]"
+    else
+        disp="(必填)"
+    fi
     while :; do
-        read -r -p "${prompt} [${default}]: " input
+        read -r -p "${prompt} ${disp}: " input
         [ -z "$input" ] && input="$default"
         if ! [[ "$input" =~ ^[0-9]+$ ]]; then
             msg_warn "端口必须是纯数字, 请重新输入"
@@ -146,11 +152,17 @@ read_cert_paths() {
     msg_ok "已启用 HTTPS: 证书=${REPLY_CERT} / 私钥=${REPLY_KEY}"
 }
 
-# 公网映射端口输入: $1=提示语 $2=默认值, 仅用于访问提示展示, 校验通过后写入全局变量 REPLY_PUBLIC_PORT
+# 公网映射端口输入: $1=提示语 $2=默认值(可为空), 仅用于访问提示展示, 校验通过后写入全局变量 REPLY_PUBLIC_PORT
+# 默认值仅在历史配置存在时提供; 无历史记录时强制手动输入, 避免误把内网监听端口当作公网端口
 read_public_port() {
-    local prompt="$1" default="$2" input
+    local prompt="$1" default="$2" input disp
+    if [ -n "$default" ]; then
+        disp="[${default}]"
+    else
+        disp="(必填, 请查服务商面板)"
+    fi
     while :; do
-        read -r -p "${prompt} [${default}]: " input
+        read -r -p "${prompt} ${disp}: " input
         [ -z "$input" ] && input="$default"
         if ! [[ "$input" =~ ^[0-9]+$ ]]; then
             msg_warn "端口必须是纯数字, 请重新输入"
@@ -434,7 +446,7 @@ do_install() {
         esac
     fi
     maybe_setup_swap
-    cur_port="$(get_current_port)";     [ -z "$cur_port" ]   && cur_port="$DEFAULT_NAT_PORT"
+    cur_port="$(get_current_port)"
     cur_domain="$(get_current_domain)"; [ -z "$cur_domain" ] && cur_domain="_"
     cur_cert="$(get_current_cert)"
     cur_key="$(get_current_key)"
@@ -442,7 +454,7 @@ do_install() {
     echo ""
     msg_info "请输入 Nginx 本地监听端口 (请填入 NAT 服务商映射给您的内网端口)"
     read_port "监听端口" "$cur_port"
-    read_public_port "NAT 服务商映射的公网端口 (1:1 映射请直接回车)" "${cur_public:-$REPLY_PORT}"
+    read_public_port "NAT 服务商分配的公网端口" "$cur_public"
     read_domain "请输入反代绑定的域名 (若仅通过 IP:端口 访问请直接回车)" "$cur_domain"
     read_cert_paths "$cur_cert" "$cur_key"
     echo ""
@@ -527,8 +539,8 @@ do_modify() {
         msg_info "当前配置: 端口=${cur_port:-未知} / 公网端口=${cur_public:-未知} / 域名=${cur_domain:-_} / HTTPS=未启用"
     fi
     echo ""
-    read_port "新监听端口 (回车保持当前值)" "${cur_port:-$DEFAULT_NAT_PORT}"
-    read_public_port "新公网映射端口 (回车保持当前值)" "${cur_public:-$REPLY_PORT}"
+    read_port "新监听端口 (回车保持当前值)" "$cur_port"
+    read_public_port "新公网映射端口 (回车保持当前值)" "$cur_public"
     read_domain "新绑定域名 (回车保持当前值)" "${cur_domain:-_}"
     read_cert_paths "$cur_cert" "$cur_key"
     cp "$NGINX_CONF" "${NGINX_CONF}.bak" || die "备份原配置失败"
