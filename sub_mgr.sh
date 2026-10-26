@@ -59,17 +59,11 @@ is_installed() {
 }
 
 #--------------------------- 交互输入 ---------------------------#
-# 端口输入: $1=提示语 $2=默认值(可为空), 校验通过后写入全局变量 REPLY_PORT
-# 默认值仅在历史配置存在时提供; 无历史记录时强制手动输入
+# 端口输入: $1=提示语 $2=默认值, 校验通过后写入全局变量 REPLY_PORT
 read_port() {
-    local prompt="$1" default="$2" input disp
-    if [ -n "$default" ]; then
-        disp="[${default}]"
-    else
-        disp="(必填)"
-    fi
+    local prompt="$1" default="$2" input
     while :; do
-        read -r -p "${prompt} ${disp}: " input
+        read -r -p "${prompt} [${default}]: " input
         [ -z "$input" ] && input="$default"
         if ! [[ "$input" =~ ^[0-9]+$ ]]; then
             msg_warn "端口必须是纯数字, 请重新输入"
@@ -104,81 +98,6 @@ read_domain() {
             return 0
         fi
         msg_warn "域名仅允许 字母/数字/./-/_/* 字符, 请重新输入"
-    done
-}
-
-# SSL 证书路径输入: $1=当前证书路径默认值 $2=当前私钥路径默认值
-# 两者都填写才启用 HTTPS; 留空保持纯 HTTP; 输入 clear 清除已有证书回退 HTTP
-# 结果写入全局变量 REPLY_CERT / REPLY_KEY (为空表示不启用 HTTPS)
-read_cert_paths() {
-    local default_cert="$1" default_key="$2" input_cert input_key
-    echo ""
-    msg_info "如需启用 HTTPS, 请输入已申请好的 SSL 证书路径 (DNS 证书亦可); 直接回车保持纯 HTTP"
-    while :; do
-        read -r -p "证书完整链路径 (fullchain.cer/pem, 输入 clear 清除已有证书) [${default_cert:-无}]: " input_cert
-        [ -z "$input_cert" ] && input_cert="$default_cert"
-        if [ "$input_cert" = "clear" ]; then
-            REPLY_CERT=""
-            REPLY_KEY=""
-            msg_info "已选择清除证书, 将回退为纯 HTTP"
-            return 0
-        fi
-        if [ -z "$input_cert" ]; then
-            REPLY_CERT=""
-            REPLY_KEY=""
-            return 0
-        fi
-        if [ ! -r "$input_cert" ]; then
-            msg_warn "证书文件不存在或不可读: ${input_cert}, 请重新输入"
-            continue
-        fi
-        break
-    done
-    while :; do
-        read -r -p "证书私钥路径 (.key) [${default_key:-无}]: " input_key
-        [ -z "$input_key" ] && input_key="$default_key"
-        if [ -z "$input_key" ]; then
-            msg_warn "已填写证书路径, 私钥路径不能为空, 请重新输入"
-            continue
-        fi
-        if [ ! -r "$input_key" ]; then
-            msg_warn "私钥文件不存在或不可读: ${input_key}, 请重新输入"
-            continue
-        fi
-        break
-    done
-    REPLY_CERT="$input_cert"
-    REPLY_KEY="$input_key"
-    msg_ok "已启用 HTTPS: 证书=${REPLY_CERT} / 私钥=${REPLY_KEY}"
-}
-
-# 公网映射端口输入: $1=提示语 $2=默认值(可为空), 仅用于访问提示展示, 校验通过后写入全局变量 REPLY_PUBLIC_PORT
-# 默认值仅在历史配置存在时提供; 无历史记录时强制手动输入, 避免误把内网监听端口当作公网端口
-read_public_port() {
-    local prompt="$1" default="$2" input disp
-    if [ -n "$default" ]; then
-        disp="[${default}]"
-    else
-        disp="(必填, 请查服务商面板)"
-    fi
-    while :; do
-        read -r -p "${prompt} ${disp}: " input
-        [ -z "$input" ] && input="$default"
-        if ! [[ "$input" =~ ^[0-9]+$ ]]; then
-            msg_warn "端口必须是纯数字, 请重新输入"
-            continue
-        fi
-        if [ "${#input}" -gt 5 ]; then
-            msg_warn "端口范围必须在 1-65535 之间, 请重新输入"
-            continue
-        fi
-        input="$((10#$input))"   # 去除前导零, 按十进制解析
-        if [ "$input" -lt 1 ] || [ "$input" -gt 65535 ]; then
-            msg_warn "端口范围必须在 1-65535 之间, 请重新输入"
-            continue
-        fi
-        REPLY_PUBLIC_PORT="$input"
-        return 0
     done
 }
 
@@ -305,10 +224,9 @@ write_nginx_conf() {
     mkdir -p /etc/nginx/conf.d
     cat > "$NGINX_CONF" <<'EOF'
 server {
-    # public_port: {{PUBLIC_PORT}}
-    listen {{NGINX_PORT}}{{SSL_SUFFIX}};
+    listen {{NGINX_PORT}};
     server_name {{DOMAIN_OR_UNDERSCORE}};
-{{CERT_LINES}}
+
     access_log off;
     error_log /var/log/nginx/sub_error.log crit;
 
@@ -326,18 +244,6 @@ server {
 EOF
     sed -i "s|{{NGINX_PORT}}|${REPLY_PORT}|g" "$NGINX_CONF"
     sed -i "s|{{DOMAIN_OR_UNDERSCORE}}|${REPLY_DOMAIN}|g" "$NGINX_CONF"
-    sed -i "s|{{PUBLIC_PORT}}|${REPLY_PUBLIC_PORT}|g" "$NGINX_CONF"
-    # 已填写证书路径时注入 ssl 参数与证书指令; 未填写时占位符替换为空, 配置与纯 HTTP 完全一致
-    if [ -n "$REPLY_CERT" ] && [ -n "$REPLY_KEY" ]; then
-        local esc_cert esc_key
-        esc_cert="$(printf '%s' "$REPLY_CERT" | sed 's/[\\&|]/\\&/g')"
-        esc_key="$(printf '%s' "$REPLY_KEY" | sed 's/[\\&|]/\\&/g')"
-        sed -i "s|{{SSL_SUFFIX}}| ssl|g" "$NGINX_CONF"
-        sed -i "s|{{CERT_LINES}}|    ssl_certificate     ${esc_cert};\n    ssl_certificate_key ${esc_key};\n    ssl_protocols TLSv1.2 TLSv1.3;|g" "$NGINX_CONF"
-    else
-        sed -i "s|{{SSL_SUFFIX}}||g" "$NGINX_CONF"
-        sed -i "s|{{CERT_LINES}}||g" "$NGINX_CONF"
-    fi
 }
 
 # 从现有配置读取当前监听端口 (无配置返回空)
@@ -350,24 +256,6 @@ get_current_port() {
 get_current_domain() {
     [ -f "$NGINX_CONF" ] || return 0
     sed -n 's/^[[:space:]]*server_name[[:space:]]\{1,\}\([^;]\{1,\}\);.*/\1/p' "$NGINX_CONF" | head -n 1
-}
-
-# 从现有配置读取当前 SSL 证书完整链路径 (无配置或未启用返回空)
-get_current_cert() {
-    [ -f "$NGINX_CONF" ] || return 0
-    sed -n 's/^[[:space:]]*ssl_certificate[[:space:]]\{1,\}\([^;]\{1,\}\);.*/\1/p' "$NGINX_CONF" | head -n 1
-}
-
-# 从现有配置读取当前 SSL 证书私钥路径 (无配置或未启用返回空)
-get_current_key() {
-    [ -f "$NGINX_CONF" ] || return 0
-    sed -n 's/^[[:space:]]*ssl_certificate_key[[:space:]]\{1,\}\([^;]\{1,\}\);.*/\1/p' "$NGINX_CONF" | head -n 1
-}
-
-# 从现有配置读取当前公网映射端口 (无配置或旧配置无记录返回空)
-get_current_public_port() {
-    [ -f "$NGINX_CONF" ] || return 0
-    sed -n 's/^[[:space:]]*#[[:space:]]*public_port:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$NGINX_CONF" | head -n 1
 }
 
 #--------------------------- 服务管理 ---------------------------#
@@ -383,18 +271,13 @@ start_services() {
     msg_ok "Nginx 已启动并监听端口 ${REPLY_PORT}"
 }
 
-# 本地部署验证 (访问 /version 拿到版本号即视为成功; 启用 SSL 时自动改用 https 并跳过本地证书校验)
+# 本地部署验证 (访问 /version 拿到版本号即视为成功)
 verify_service() {
     sleep 1
-    local version scheme="http"
-    if grep -q "listen.*ssl" "$NGINX_CONF" 2>/dev/null; then
-        scheme="https"
-        version="$(curl -sk --connect-timeout 5 "https://127.0.0.1:${REPLY_PORT}/version" | tr -d '\r\n')"
-    else
-        version="$(curl -s --connect-timeout 5 "http://127.0.0.1:${REPLY_PORT}/version" | tr -d '\r\n')"
-    fi
+    local version
+    version="$(curl -s --connect-timeout 5 "http://127.0.0.1:${REPLY_PORT}/version" | tr -d '\r\n')"
     if [ -n "$version" ]; then
-        msg_ok "部署验证通过: ${scheme}://127.0.0.1:${REPLY_PORT}/version -> 后端版本 ${version}"
+        msg_ok "部署验证通过: http://127.0.0.1:${REPLY_PORT}/version -> 后端版本 ${version}"
     else
         msg_warn "部署验证失败 (未获取到版本号), 可执行 journalctl -u ${SERVICE_NAME} -n 20 与 nginx -t 排查"
     fi
@@ -433,7 +316,7 @@ do_install() {
     echo "=================================================="
     echo "          Subconverter 安装向导 (NAT VPS 版)"
     echo "=================================================="
-    local mem disk_free cur_port cur_domain cur_cert cur_key cur_public go=""
+    local mem disk_free cur_port cur_domain go=""
     mem="$(get_total_mem_mb)"
     disk_free="$(get_disk_free_mb)"
     msg_info "系统预检: 物理内存 ${mem}MB / 磁盘剩余 ${disk_free}MB / 架构 $(uname -m)"
@@ -446,21 +329,14 @@ do_install() {
         esac
     fi
     maybe_setup_swap
-    cur_port="$(get_current_port)"
+    cur_port="$(get_current_port)";     [ -z "$cur_port" ]   && cur_port="$DEFAULT_NAT_PORT"
     cur_domain="$(get_current_domain)"; [ -z "$cur_domain" ] && cur_domain="_"
-    cur_cert="$(get_current_cert)"
-    cur_key="$(get_current_key)"
-    cur_public="$(get_current_public_port)"
     echo ""
     msg_info "请输入 Nginx 本地监听端口 (请填入 NAT 服务商映射给您的内网端口)"
     read_port "监听端口" "$cur_port"
-    read_public_port "NAT 公网端口 (与监听端口一致请直接回车)" "${cur_public:-$REPLY_PORT}"
     read_domain "请输入反代绑定的域名 (若仅通过 IP:端口 访问请直接回车)" "$cur_domain"
-    read_cert_paths "$cur_cert" "$cur_key"
     echo ""
-    local scheme="http"
-    [ -n "$REPLY_CERT" ] && scheme="https"
-    msg_info "安装参数: 端口=${REPLY_PORT} / 公网端口=${REPLY_PUBLIC_PORT} / 域名=${REPLY_DOMAIN} / 内部端口=${SUB_INTERNAL_PORT} / 协议=${scheme}"
+    msg_info "安装参数: 端口=${REPLY_PORT} / 域名=${REPLY_DOMAIN} / 内部端口=${SUB_INTERNAL_PORT}"
     echo ""
     msg_info "[1/5] 安装系统依赖 (curl wget tar nginx)..."
     install_deps
@@ -476,17 +352,11 @@ do_install() {
     verify_service
     echo ""
     msg_ok "部署完成!"
-    if [ -n "$REPLY_CERT" ]; then
-        msg_info "访问地址: https://${REPLY_DOMAIN}:${REPLY_PUBLIC_PORT}/"
-        msg_info "部署验证: 浏览器访问 https://${REPLY_DOMAIN}:${REPLY_PUBLIC_PORT}/version 看到版本号即部署成功"
-        msg_info "同端口 HTTP 已不可用; 证书续期后执行 systemctl reload nginx (或配置 acme.sh --reloadcmd)"
-    else
-        local ip
-        ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-        [ -n "$ip" ] && msg_info "本机地址: http://${ip}:${REPLY_PORT}/ (对外请使用公网地址:${REPLY_PUBLIC_PORT})"
-        msg_info "部署验证: 浏览器访问 http://<公网地址>:${REPLY_PUBLIC_PORT}/version 看到版本号即部署成功"
-        msg_info "当前为纯 HTTP 访问, 如需 HTTPS 请运行本脚本选 6 填入证书路径"
-    fi
+    local ip
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [ -n "$ip" ] && msg_info "本机地址: http://${ip}:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
+    msg_info "部署验证: 浏览器访问 http://<公网地址>:<公网端口>/version 看到版本号即部署成功"
+    msg_info "只能用http://<公网地址>:${REPLY_PORT} 访问, 不能用https://<公网地址>:${REPLY_PORT}/"
 }
 
 # 选项 2: 查看服务运行状态与内存占用
@@ -501,58 +371,35 @@ do_status() {
             msg_err "${svc}: 未运行 (当前状态: $(systemctl is-active "$svc" 2>/dev/null || echo unknown))"
         fi
     done
-    local cur_port cur_domain cur_cert cur_public
+    local cur_port cur_domain
     cur_port="$(get_current_port)"
     cur_domain="$(get_current_domain)"
-    cur_cert="$(get_current_cert)"
-    cur_public="$(get_current_public_port)"
-    [ -z "$cur_public" ] && cur_public="<公网端口>"
-    if [ -n "$cur_cert" ]; then
-        [ -n "$cur_port" ] && msg_info "当前反代配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_} / HTTPS=启用"
-        [ -n "$cur_port" ] && msg_info "证书完整链: ${cur_cert} (续期后请执行 systemctl reload nginx)"
-        [ -n "$cur_port" ] && msg_info "访问地址: https://${cur_domain}:${cur_public}/"
-        [ -n "$cur_port" ] && msg_info "部署验证: 浏览器访问 https://${cur_domain}:${cur_public}/version 看到版本号即部署成功 (同端口 HTTP 已不可用)"
-    else
-        [ -n "$cur_port" ] && msg_info "当前反代配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_} / HTTPS=未启用"
-        [ -n "$cur_port" ] && msg_info "部署验证: 浏览器访问 http://<公网地址>:${cur_public}/version 看到版本号即部署成功"
-        [ -n "$cur_port" ] && msg_info "只能用http://<公网地址>:${cur_public} 访问, 不能用https://<公网地址>:${cur_public}/ (如需 HTTPS 请选 6 填入证书路径)"
-    fi
+    [ -n "$cur_port" ] && msg_info "当前反代配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_}"
+    [ -n "$cur_port" ] && msg_info "部署验证: 浏览器访问 http://<公网地址>:${cur_port}/version 看到版本号即部署成功"
+    [ -n "$cur_port" ] && msg_info "只能用http://<公网地址>:${cur_port} 访问, 不能用https://<公网地址>:${cur_port}/"
     echo ""
     free -m 2>/dev/null | sed -n '1,3p'
 }
 
-# 选项 6: 修改配置 (NAT 监听端口 / 绑定域名 / SSL 证书)
+# 选项 6: 修改配置 (NAT 监听端口 / 绑定域名)
 do_modify() {
     if [ ! -f "$NGINX_CONF" ]; then
         msg_err "尚未安装本套件, 请先执行安装 (选项 1)"
         return 1
     fi
-    local cur_port cur_domain cur_cert cur_key cur_public
+    local cur_port cur_domain
     cur_port="$(get_current_port)"
     cur_domain="$(get_current_domain)"
-    cur_cert="$(get_current_cert)"
-    cur_key="$(get_current_key)"
-    cur_public="$(get_current_public_port)"
-    if [ -n "$cur_cert" ]; then
-        msg_info "当前配置: 端口=${cur_port:-未知} / 公网端口=${cur_public:-未知} / 域名=${cur_domain:-_} / HTTPS=启用 (${cur_cert})"
-    else
-        msg_info "当前配置: 端口=${cur_port:-未知} / 公网端口=${cur_public:-未知} / 域名=${cur_domain:-_} / HTTPS=未启用"
-    fi
+    msg_info "当前配置: 端口=${cur_port:-未知} / 域名=${cur_domain:-_}"
     echo ""
-    read_port "新监听端口 (回车保持当前值)" "$cur_port"
-    read_public_port "新公网端口 (与监听端口一致请直接回车)" "${cur_public:-$REPLY_PORT}"
+    read_port "新监听端口 (回车保持当前值)" "${cur_port:-$DEFAULT_NAT_PORT}"
     read_domain "新绑定域名 (回车保持当前值)" "${cur_domain:-_}"
-    read_cert_paths "$cur_cert" "$cur_key"
     cp "$NGINX_CONF" "${NGINX_CONF}.bak" || die "备份原配置失败"
     write_nginx_conf
     if nginx -t; then
         systemctl reload nginx 2>/dev/null || systemctl restart nginx
         rm -f "${NGINX_CONF}.bak"
-        if [ -n "$REPLY_CERT" ]; then
-            msg_ok "配置已生效: 端口=${REPLY_PORT} / 公网端口=${REPLY_PUBLIC_PORT} / 域名=${REPLY_DOMAIN} / HTTPS=启用"
-        else
-            msg_ok "配置已生效: 端口=${REPLY_PORT} / 公网端口=${REPLY_PUBLIC_PORT} / 域名=${REPLY_DOMAIN} / 纯 HTTP"
-        fi
+        msg_ok "配置已生效: 端口=${REPLY_PORT} / 域名=${REPLY_DOMAIN}"
     else
         mv -f "${NGINX_CONF}.bak" "$NGINX_CONF"
         msg_err "新配置语法检查失败, 已回滚为原配置"
@@ -671,7 +518,7 @@ show_menu() {
     echo " 3. 启动所有服务 (Subconverter + Nginx)"
     echo " 4. 停止所有服务"
     echo " 5. 重启所有服务"
-    echo " 6. 修改配置 (监听端口 / 绑定域名 / SSL证书)"
+    echo " 6. 修改配置 (NAT监听端口 / 绑定域名)"
     echo " 7. 一键完全卸载 (清理所有文件与配置)"
     echo " 8. 更新 Subconverter 程序"
     echo " 0. 退出脚本"
