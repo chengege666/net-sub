@@ -377,8 +377,14 @@ do_status() {
     cur_port="$(get_current_port)"
     cur_domain="$(get_current_domain)"
     [ -n "$cur_port" ] && msg_info "当前反代配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_}"
-    [ -n "$cur_port" ] && msg_info "部署验证: 浏览器访问 http://<公网地址>:${cur_port}/version 看到版本号即部署成功"
-    [ -n "$cur_port" ] && msg_info "只能用http://<公网地址>:${cur_port} 访问, 不能用https://<公网地址>:${cur_port}/"
+    if [ -n "$cur_port" ]; then
+        if [ -n "$cur_domain" ] && [ "$cur_domain" != "_" ]; then
+            msg_info "域名地址: https://${cur_domain}/version (需域名托管到 Cloudflare, 开启小黄云代理并配置回源端口)"
+        else
+            msg_info "部署验证: 浏览器访问 http://<公网IP>:${cur_port}/version 看到版本号即部署成功"
+        fi
+    fi
+    [ -n "$cur_port" ] && msg_info "只能用http://<公网IP>:${cur_port} 访问, 不能用https://<公网IP>:${cur_port}/"
     echo ""
     free -m 2>/dev/null | sed -n '1,3p'
 }
