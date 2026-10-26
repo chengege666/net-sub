@@ -352,11 +352,13 @@ do_install() {
     verify_service
     echo ""
     msg_ok "部署完成!"
-    local ip
-    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    [ -n "$ip" ] && msg_info "本机地址: http://${ip}:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
-    msg_info "部署验证: 浏览器访问 http://<公网地址>:<公网端口>/version 看到版本号即部署成功"
-    msg_info "只能用http://<公网地址>:${REPLY_PORT} 访问, 不能用https://<公网地址>:${REPLY_PORT}/"
+    msg_info "本机地址: http://<公网IP>:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
+    if [ -n "$REPLY_DOMAIN" ] && [ "$REPLY_DOMAIN" != "_" ]; then
+        msg_info "域名地址: https://${REPLY_DOMAIN}/version (需域名托管到 Cloudflare, 开启小黄云代理并配置回源端口)"
+    else
+        msg_info "部署验证: 浏览器访问 http://<公网IP>:${REPLY_PORT}/version 看到版本号即部署成功"
+    fi
+    msg_info "只能用http://<公网IP>:${REPLY_PORT} 访问, 不能用https://<公网IP>:${REPLY_PORT}/"
 }
 
 # 选项 2: 查看服务运行状态与内存占用
