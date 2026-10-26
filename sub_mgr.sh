@@ -354,7 +354,7 @@ do_install() {
     msg_ok "部署完成!"
     msg_info "本机地址: http://<公网IP>:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
     if [ -n "$REPLY_DOMAIN" ] && [ "$REPLY_DOMAIN" != "_" ]; then
-        msg_info "域名地址: https://${REPLY_DOMAIN}/version (需域名托管到 Cloudflare, 开启小黄云代理并配置回源端口)"
+        msg_info "域名地址: http://${REPLY_DOMAIN}/version (需域名托管到 Cloudflare, 开启小黄云代理并配置回源端口)"
     else
         msg_info "部署验证: 浏览器访问 http://<公网IP>:${REPLY_PORT}/version 看到版本号即部署成功"
     fi
@@ -379,7 +379,7 @@ do_status() {
     [ -n "$cur_port" ] && msg_info "当前反代配置: 监听端口 ${cur_port} / 域名 ${cur_domain:-_}"
     if [ -n "$cur_port" ]; then
         if [ -n "$cur_domain" ] && [ "$cur_domain" != "_" ]; then
-            msg_info "域名地址: https://${cur_domain}/version (需域名托管到 Cloudflare, 开启小黄云代理并配置回源端口)"
+            msg_info "域名地址: http://${cur_domain}/version (需域名托管到 Cloudflare, 开启小黄云代理并配置回源端口)"
         else
             msg_info "部署验证: 浏览器访问 http://<公网IP>:${cur_port}/version 看到版本号即部署成功"
         fi
