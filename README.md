@@ -60,12 +60,14 @@ wget -qO sub_mgr.sh https://ghfast.top/https://raw.githubusercontent.com/chengeg
  6. 修改配置 (NAT监听端口 / 绑定域名)
  7. 一键完全卸载 (清理所有文件与配置)
  8. 更新 Subconverter 程序
+ 9. 配置 Cloudflare Tunnel (HTTPS 加密访问)
  0. 退出脚本
 ==================================================
 ```
 
 - 首次运行自动进入**安装向导**；已安装则直接显示主菜单。
 - 覆盖安装具备幂等性，整份配置重写，不会重复堆叠。
+- 选项 `9` 见下方 [Cloudflare Tunnel HTTPS 接入](#cloudflare-tunnel-https-接入) 章节。
 
 ## 安装向导说明
 
@@ -93,6 +95,45 @@ http://<公网地址>:<公网端口>/sub?target=clash&url=<订阅链接>
 
 对外访问请使用 **NAT 服务商映射的公网地址和公网端口**，脚本内端口填的是映射的内网端口。
 
+---
+
+## Cloudflare Tunnel HTTPS 接入
+
+主菜单选 `9`，脚本自动完成 cloudflared 安装、隧道创建、DNS 绑定与服务注册，让订阅地址从 `http://` 升级为 `https://`，**无需公网标准端口**（NAT 高位端口也能用）。
+
+### 前提条件
+
+1. 拥有一个域名，且已托管到 Cloudflare（免费版即可）；
+2. VPS 能正常访问外网（Tunnel 走出站连接，不需要任何入站端口映射）。
+
+### 向导流程
+
+| 步骤 | 脚本动作 | 需要您做的 |
+|---|---|---|
+| 输入域名 | 校验主机名格式 | 填完整子域名，如 `jp.example.com` |
+| 安装客户端 | 按架构下载 cloudflared 至 `/usr/local/bin` | 无 |
+| 账号登录 | 执行 `cloudflared tunnel login` | 浏览器打开授权 URL，选择域名的 Zone |
+| 创建隧道 | 创建/复用名为 `net-sub` 的隧道 | 无 |
+| 写入配置 | 生成 `/etc/cloudflared/config.yml`，流量转发至 `localhost:25500` | 无 |
+| 绑定 DNS | 执行 `cloudflared tunnel route dns` | 若该主机名已有旧 A 记录，需先到 Cloudflare 控制台删除 |
+| 注册服务 | `cloudflared service install` 并启动，开机自启 | 无 |
+| 验证 | 自动请求 `https://<域名>/version` | 无 |
+
+登录环节注意：`cloudflared tunnel login` 在 SSH 里会打印一个授权 URL。若授权后浏览器跳转的 `localhost` 回调页打不开，复制浏览器地址栏完整的回调地址，另开一个 SSH 终端执行 `curl -s '<回调地址>'` 即可完成登录。
+
+### 使用效果
+
+- 订阅地址：`https://<您的域名>/sub?target=clash&url=<订阅链接>`
+- 原 `http://<公网IP>:<公网端口>` 入口依然保留可用
+- Tunnel 直连 Subconverter 内部端口 25500，不经过 Nginx；若不再需要 Nginx，可用菜单 `4` 停止以节省约 10MB 内存
+- 菜单 `2` 状态页会显示 Tunnel 运行状态
+
+### 常见问题
+
+- **route dns 失败？** 多为该主机名已存在旧 A 记录冲突，到 Cloudflare 控制台 DNS 页面删除后重跑选项 `9`（幂等，可安全重复执行）。
+- **验证未通过？** DNS 生效与隧道建立有延迟，稍候重试；排查 `journalctl -u cloudflared -n 30`。
+- **云端残留：** 卸载脚本只清理 VPS 本地配置，云端隧道与 DNS 记录需自行到 Cloudflare 控制台删除。
+
 ## 常用运维命令
 
 ```bash
@@ -112,10 +153,13 @@ nginx -t                          # Nginx 配置语法检查
 | `/etc/nginx/conf.d/subconverter.conf` | Nginx 站点配置（端口/域名在此） |
 | `/var/log/nginx/sub_error.log` | Nginx 错误日志（仅记录 crit 级别） |
 | `/swapfile` | 脚本创建的虚拟内存（卸载时自动移除） |
+| `/usr/local/bin/cloudflared` | Tunnel 客户端程序（仅使用选项 9 时存在） |
+| `/etc/cloudflared/config.yml` | Tunnel 转发配置（卸载时自动移除） |
+| `/root/.cloudflared/` | Cloudflare 登录凭据与隧道密钥（卸载时保留，需自行删除） |
 
 ## 完全卸载
 
-主菜单选 `7`，自动完成：停止并禁用服务 → 删除 `/opt/subconverter` → 删除 Nginx 站点配置 → 移除脚本创建的 Swap，不留垃圾文件（nginx 软件包保留，如需删除执行 `apt-get purge nginx`）。
+主菜单选 `7`，自动完成：停止并禁用服务 → 删除 `/opt/subconverter` → 删除 Nginx 站点配置 → 移除脚本创建的 Swap → 清理 Tunnel 本地配置与系统服务（云端隧道需自行到 Cloudflare 控制台删除），不留垃圾文件（nginx 软件包保留，如需删除执行 `apt-get purge nginx`）。
 
 ## 常见问题
 

@@ -24,6 +24,10 @@ SWAP_SIZE_MB="512"                                          # 虚拟内存大小
 SWAP_FSTAB_TAG="nat-sub-mgr"                                # fstab 标记 (用于卸载时识别脚本创建的 Swap)
 TMP_FILE="/tmp/subconverter_pkg.tar.gz"                     # 安装包临时下载路径
 EXTRACT_TMP="/opt/.subconverter_tmp"                        # 解压临时目录
+CF_BIN="/usr/local/bin/cloudflared"                         # Cloudflare Tunnel 客户端路径
+CF_CONFIG="/etc/cloudflared/config.yml"                     # Tunnel 配置文件路径
+CF_HOME="${HOME:-/root}/.cloudflared"                       # cloudflared 凭据目录
+TUNNEL_NAME="net-sub"                                       # 脚本创建的隧道名称
 
 #--------------------------- 输出辅助 ---------------------------#
 C_RED='\033[31m'; C_GREEN='\033[32m'; C_YELLOW='\033[33m'; C_BLUE='\033[34m'; C_RESET='\033[0m'
@@ -309,6 +313,157 @@ svc_action() {
     return "$rc"
 }
 
+#--------------------------- Cloudflare Tunnel ---------------------------#
+# 确保 cloudflared 客户端已安装
+ensure_cloudflared() {
+    command -v cloudflared >/dev/null 2>&1 && return 0
+    local asset
+    case "$(uname -m)" in
+        x86_64)  asset="cloudflared-linux-amd64" ;;
+        aarch64) asset="cloudflared-linux-arm64" ;;
+        *) die "不支持的 CPU 架构: $(uname -m) (cloudflared 仅支持 x86_64 / aarch64)" ;;
+    esac
+    local url="https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}"
+    msg_info "下载 cloudflared: ${url}"
+    local tmp="/tmp/cloudflared_dl.tmp"
+    curl -fSL --connect-timeout 15 --max-time 300 -o "$tmp" "$url" \
+        || { rm -f "$tmp"; die "cloudflared 下载失败, 请检查网络后重试"; }
+    [ -s "$tmp" ] || { rm -f "$tmp"; die "cloudflared 下载文件为空"; }
+    install -m 755 "$tmp" "$CF_BIN" || { rm -f "$tmp"; die "cloudflared 安装失败"; }
+    rm -f "$tmp"
+    msg_ok "cloudflared 安装完成: $("$CF_BIN" --version 2>/dev/null | head -n 1)"
+}
+
+# 完整主机名输入: 校验通过后写入全局 REPLY_HOST
+read_tunnel_host() {
+    local default="${1:-}" input
+    while :; do
+        read -r -p "请输入 Tunnel 对外访问的完整域名 [${default}]: " input
+        [ -z "$input" ] && input="$default"
+        if [[ "$input" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+            REPLY_HOST="$input"
+            return 0
+        fi
+        msg_warn "需为完整主机名 (如 jp.example.com), 仅允许 字母/数字/-/., 请重新输入"
+    done
+}
+
+# 确认 cloudflared 已登录 Cloudflare 账号, 未完成则引导登录
+tunnel_ensure_login() {
+    if cloudflared tunnel list >/dev/null 2>&1; then
+        return 0
+    fi
+    echo ""
+    msg_info "首次使用需登录 Cloudflare 账号 (浏览器授权)"
+    msg_info "执行 cloudflared tunnel login 后会显示授权 URL:"
+    msg_info "  1) 在电脑浏览器打开该 URL 并登录 Cloudflare"
+    msg_info "  2) 选择托管您域名的 Zone"
+    msg_info "  3) 若授权后回调页面打不开, 复制浏览器地址栏完整的 localhost 回调地址,"
+    msg_info "     另开一个 SSH 终端执行: curl -s '<回调地址>' 即可完成"
+    echo ""
+    read -r -p "按回车开始登录流程..." _
+    cloudflared tunnel login || die "cloudflared 登录失败, 请重试"
+    cloudflared tunnel list >/dev/null 2>&1 || die "登录凭据未生效, 请重新完成浏览器授权"
+    msg_ok "Cloudflare 登录状态正常"
+}
+
+# 选项 9: 配置 Cloudflare Tunnel 实现 HTTPS 加密访问 (无需公网标准端口)
+do_tunnel() {
+    echo ""
+    echo "=================================================="
+    echo "     Cloudflare Tunnel HTTPS 接入向导"
+    echo "=================================================="
+    msg_info "适用: NAT VPS 公网端口非 Cloudflare 标准端口时, 通过出站隧道实现 https 访问"
+    if [ -f "$CF_CONFIG" ]; then
+        msg_warn "检测到已存在 Tunnel 配置: ${CF_CONFIG}"
+        msg_info "继续将覆盖重建该配置 (同名隧道复用)"
+    fi
+    local cur_domain
+    cur_domain="$(get_current_domain)"
+    [ "$cur_domain" = "_" ] && cur_domain=""
+    read_tunnel_host "$cur_domain"
+    ensure_cloudflared
+    tunnel_ensure_login
+
+    # 复用同名隧道或创建新隧道
+    local uuid cred_file create_out
+    uuid="$(cloudflared tunnel list 2>/dev/null | awk -v n="$TUNNEL_NAME" '$2==n {print $1; exit}')"
+    if [ -n "$uuid" ]; then
+        msg_ok "复用已有隧道 ${TUNNEL_NAME} (${uuid})"
+        cred_file="$(ls -1 "${CF_HOME}/${uuid}.json" 2>/dev/null | head -n 1)"
+        [ -n "$cred_file" ] || cred_file="${CF_HOME}/${uuid}.json"
+    else
+        msg_info "创建隧道 ${TUNNEL_NAME} ..."
+        create_out="$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1)" \
+            || { msg_err "${create_out}"; die "隧道创建失败"; }
+        uuid="$(echo "$create_out" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n 1)"
+        cred_file="$(echo "$create_out" | grep -oE '/[^[:space:]]*\.json' | head -n 1)"
+        [ -n "$uuid" ] || die "未能从输出中解析隧道 UUID, 请手动执行 cloudflared tunnel list 查看"
+        [ -n "$cred_file" ] || cred_file="${CF_HOME}/${uuid}.json"
+        msg_ok "隧道已创建: ${uuid}"
+    fi
+
+    # 写入配置文件 (ingress 直连 Subconverter 内部端口)
+    mkdir -p /etc/cloudflared
+    cat > "$CF_CONFIG" <<EOF
+tunnel: ${uuid}
+credentials-file: ${cred_file}
+
+ingress:
+  - hostname: ${REPLY_HOST}
+    service: http://localhost:${SUB_INTERNAL_PORT}
+  - service: http_status:404
+EOF
+    msg_ok "配置已写入 ${CF_CONFIG}"
+
+    # 为域名添加隧道 DNS 记录
+    msg_info "绑定 DNS 记录: ${REPLY_HOST} -> 隧道 ..."
+    local dns_out
+    if dns_out="$(cloudflared tunnel route dns "$TUNNEL_NAME" "$REPLY_HOST" 2>&1)"; then
+        msg_ok "DNS 记录已添加"
+    else
+        msg_warn "DNS 记录添加失败: ${dns_out}"
+        msg_info "常见原因: 该主机名已有旧 A 记录. 请到 Cloudflare 控制台 DNS 页面删除旧记录后重试"
+        return 1
+    fi
+
+    # 注册为开机自启服务并启动
+    msg_info "安装 cloudflared 系统服务 ..."
+    cloudflared service install >/dev/null 2>&1 || msg_warn "service install 返回异常, 继续尝试启动"
+    systemctl restart cloudflared || die "cloudflared 服务启动失败, 排查: journalctl -u cloudflared -n 30"
+    msg_ok "cloudflared 服务已运行"
+
+    # 端到端验证
+    echo ""
+    msg_info "等待隧道就绪 (10 秒) 后验证 https://<域名>/version ..."
+    sleep 10
+    local version
+    version="$(curl -s --connect-timeout 10 --max-time 20 "https://${REPLY_HOST}/version" | tr -d '\r\n')"
+    if [ -n "$version" ]; then
+        msg_ok "HTTPS 接入成功: https://${REPLY_HOST}/version -> 后端版本 ${version}"
+    else
+        msg_warn "验证暂未通过 (DNS 生效或隧道建立可能有延迟, 稍后再试)"
+        msg_info "排查: systemctl status cloudflared / journalctl -u cloudflared -n 30"
+    fi
+    echo ""
+    msg_ok "配置完成! 订阅转换地址:"
+    msg_info "https://${REPLY_HOST}/sub?target=clash&url=<订阅链接>"
+    msg_info "Tunnel 无需公网标准端口, 原 http://<公网IP>:端口 入口仍然可用"
+}
+
+# Tunnel 运行状态摘要 (供 do_status 调用, 未配置则静默跳过)
+tunnel_status_line() {
+    [ -f "$CF_CONFIG" ] || return 0
+    local host state
+    host="$(sed -n 's/^[[:space:]]*hostname:[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$CF_CONFIG" | head -n 1)"
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then
+        state="运行中"
+    else
+        state="未运行"
+    fi
+    msg_info "Cloudflare Tunnel: ${state} (https://${host:-未知域名}/version)"
+}
+
 #--------------------------- 功能选项 ---------------------------#
 # 选项 1: 全新安装 / 覆盖安装
 do_install() {
@@ -385,6 +540,7 @@ do_status() {
         fi
     fi
     [ -n "$cur_port" ] && msg_info "只能用http://<公网IP>:${cur_port} 访问, 不能用https://<公网IP>:${cur_port}/"
+    tunnel_status_line
     echo ""
     free -m 2>/dev/null | sed -n '1,3p'
 }
@@ -423,7 +579,7 @@ do_uninstall() {
     fi
     local ans=""
     echo ""
-    msg_warn "即将完全卸载: 停止并禁用服务 / 删除 ${INSTALL_DIR} / 删除 Nginx 站点配置 / 移除脚本创建的 Swap"
+    msg_warn "即将完全卸载: 停止并禁用服务 / 删除 ${INSTALL_DIR} / 删除 Nginx 站点配置 / 移除脚本创建的 Swap / 清理 Cloudflare Tunnel 本地配置"
     read -r -p "确认完全卸载? [y/N]: " ans
     case "$ans" in
         y|Y|yes|YES) ;;
@@ -431,6 +587,12 @@ do_uninstall() {
     esac
     systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1
     systemctl disable --now nginx >/dev/null 2>&1
+    if [ -f "$CF_CONFIG" ] || command -v cloudflared >/dev/null 2>&1; then
+        systemctl disable --now cloudflared >/dev/null 2>&1
+        cloudflared service uninstall >/dev/null 2>&1
+        rm -f "$CF_CONFIG"
+        msg_ok "已清理 Tunnel 本地配置 (云端隧道如不再使用, 请到 Cloudflare 控制台删除)"
+    fi
     rm -rf "$INSTALL_DIR"
     rm -f "$NGINX_CONF" "${NGINX_CONF}.bak" "$SYSTEMD_UNIT"
     if grep -q "$SWAP_FSTAB_TAG" /etc/fstab 2>/dev/null; then
@@ -529,6 +691,7 @@ show_menu() {
     echo " 6. 修改配置 (NAT监听端口 / 绑定域名)"
     echo " 7. 一键完全卸载 (清理所有文件与配置)"
     echo " 8. 更新 Subconverter 程序"
+    echo " 9. 配置 Cloudflare Tunnel (HTTPS 加密访问)"
     echo " 0. 退出脚本"
     echo "=================================================="
 }
@@ -543,7 +706,7 @@ main() {
     while :; do
         show_menu
         local choice=""
-        read -r -p "请输入选项编号 [0-8]: " choice
+        read -r -p "请输入选项编号 [0-9]: " choice
         case "$choice" in
             1) do_install ;;
             2) do_status ;;
@@ -553,8 +716,9 @@ main() {
             6) do_modify ;;
             7) do_uninstall ;;
             8) do_update ;;
+            9) do_tunnel ;;
             0) msg_info "再见"; exit 0 ;;
-            *) msg_warn "无效选项, 请输入 0-8" ;;
+            *) msg_warn "无效选项, 请输入 0-9" ;;
         esac
         echo ""
         read -r -p "按回车键返回主菜单..." _
