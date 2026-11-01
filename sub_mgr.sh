@@ -5,7 +5,7 @@
 # 适用系统 : Debian 10/11/12, Ubuntu 20.04/22.04/24.04 (仅限 apt + systemd)
 # 运行环境 : NAT VPS (小内存 / 小硬盘 / 无标准 Web 端口), x86_64 或 aarch64
 # 程序来源 : https://github.com/asdlokj1qpi233/subconverter (最新 release 预编译包)
-# 部署方式 : 二进制部署 + Systemd 守护 + Nginx 反代 (严禁 Docker)
+# 部署方式 : 二进制部署 + Systemd 守护 + Cloudflare Tunnel(推荐) 或 Nginx 反代 (严禁 Docker)
 # 使用方法 : sudo bash sub_mgr.sh
 # 注意事项 : 上传到 VPS 时请保持 LF 换行符 (必要时执行 dos2unix sub_mgr.sh)
 #=============================================================================
@@ -57,9 +57,9 @@ has_swap() {
     [ "$(grep -c . /proc/swaps 2>/dev/null)" -gt 1 ]
 }
 
-# 是否已安装本套件 (程序目录 + Nginx 站点配置同时存在)
+# 是否已安装本套件 (程序存在, 且 Nginx 反代配置或 Tunnel 配置至少其一)
 is_installed() {
-    [ -x "${INSTALL_DIR}/subconverter" ] && [ -f "${NGINX_CONF}" ]
+    [ -x "${INSTALL_DIR}/subconverter" ] && { [ -f "${NGINX_CONF}" ] || [ -f "${CF_CONFIG}" ]; }
 }
 
 #--------------------------- 交互输入 ---------------------------#
@@ -142,16 +142,28 @@ maybe_setup_swap() {
 }
 
 #--------------------------- 依赖安装 ---------------------------#
+# 核心依赖 (两种模式都需要)
 install_deps() {
     command -v apt-get >/dev/null 2>&1 || die "未检测到 apt-get, 本脚本仅支持 Debian / Ubuntu"
     command -v systemctl >/dev/null 2>&1 || die "未检测到 systemctl, 本脚本需要 Systemd 环境"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y || msg_warn "apt-get update 失败, 尝试继续安装依赖"
-    apt-get install -y --no-install-recommends curl wget tar nginx \
+    apt-get install -y --no-install-recommends curl wget tar \
         || die "依赖安装失败, 请检查网络或软件源后重试"
     apt-get clean
     rm -rf /var/lib/apt/lists/*
-    msg_ok "依赖安装完成, 已清理 apt 缓存释放磁盘"
+    msg_ok "核心依赖安装完成, 已清理 apt 缓存释放磁盘"
+}
+
+# Nginx 依赖 (仅反代模式需要)
+install_nginx() {
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y || msg_warn "apt-get update 失败, 尝试继续安装依赖"
+    apt-get install -y --no-install-recommends nginx \
+        || die "Nginx 安装失败, 请检查网络或软件源后重试"
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+    msg_ok "Nginx 安装完成, 已清理 apt 缓存释放磁盘"
 }
 
 #--------------------------- 程序下载与部署 ---------------------------#
@@ -269,27 +281,34 @@ start_services() {
     systemctl restart "$SERVICE_NAME" \
         || die "subconverter 服务启动失败, 可执行: journalctl -u ${SERVICE_NAME} -n 20 排查"
     msg_ok "subconverter 服务已启动 (异常自动拉起: Restart=always)"
-    nginx -t || die "Nginx 配置语法检查失败, 已终止"
-    systemctl enable nginx >/dev/null 2>&1
-    systemctl restart nginx || die "Nginx 启动失败"
-    msg_ok "Nginx 已启动并监听端口 ${REPLY_PORT}"
-}
-
-# 本地部署验证 (访问 /version 拿到版本号即视为成功)
-verify_service() {
-    sleep 1
-    local version
-    version="$(curl -s --connect-timeout 5 "http://127.0.0.1:${REPLY_PORT}/version" | tr -d '\r\n')"
-    if [ -n "$version" ]; then
-        msg_ok "部署验证通过: http://127.0.0.1:${REPLY_PORT}/version -> 后端版本 ${version}"
-    else
-        msg_warn "部署验证失败 (未获取到版本号), 可执行 journalctl -u ${SERVICE_NAME} -n 20 与 nginx -t 排查"
+    if [ -f "$NGINX_CONF" ]; then
+        nginx -t || die "Nginx 配置语法检查失败, 已终止"
+        systemctl enable nginx >/dev/null 2>&1
+        systemctl restart nginx || die "Nginx 启动失败"
+        msg_ok "Nginx 已启动并监听端口 $(get_current_port)"
+    fi
+    if [ -f "$CF_CONFIG" ] && command -v cloudflared >/dev/null 2>&1; then
+        systemctl enable cloudflared >/dev/null 2>&1
+        systemctl restart cloudflared 2>/dev/null \
+            || msg_warn "cloudflared 重启失败, 可执行: journalctl -u cloudflared -n 30 排查"
     fi
 }
 
-# 服务启停/重启: $1 = start | stop | restart
+# 本地部署验证 (直连后端内部端口, 访问 /version 拿到版本号即视为成功)
+verify_service() {
+    sleep 1
+    local version
+    version="$(curl -s --connect-timeout 5 "http://127.0.0.1:${SUB_INTERNAL_PORT}/version" | tr -d '\r\n')"
+    if [ -n "$version" ]; then
+        msg_ok "部署验证通过: http://127.0.0.1:${SUB_INTERNAL_PORT}/version -> 后端版本 ${version}"
+    else
+        msg_warn "部署验证失败 (未获取到版本号), 可执行 journalctl -u ${SERVICE_NAME} -n 20 排查"
+    fi
+}
+
+# 服务启停/重启: $1 = start | stop | restart (仅操作实际已配置的服务)
 svc_action() {
-    local action="$1" cn="" rc=0
+    local action="$1" cn="" rc=0 extra=""
     case "$action" in
         start)   cn="启动" ;;
         stop)    cn="停止" ;;
@@ -298,18 +317,26 @@ svc_action() {
     esac
     if [ "$action" = "stop" ]; then
         systemctl stop "$SERVICE_NAME" 2>/dev/null || { msg_err "subconverter 停止失败"; rc=1; }
-        systemctl stop nginx 2>/dev/null           || { msg_err "nginx 停止失败"; rc=1; }
+        [ -f "$NGINX_CONF" ] && { systemctl stop nginx 2>/dev/null || { msg_err "nginx 停止失败"; rc=1; }; }
+        [ -f "$CF_CONFIG" ]  && { systemctl stop cloudflared 2>/dev/null || { msg_err "cloudflared 停止失败"; rc=1; }; }
     else
         systemctl "$action" "$SERVICE_NAME" \
             || { msg_err "subconverter ${cn}失败, 可执行: journalctl -u ${SERVICE_NAME} -n 20 排查"; rc=1; }
-        if nginx -t >/dev/null 2>&1; then
-            systemctl "$action" nginx || { msg_err "nginx ${cn}失败"; rc=1; }
-        else
-            msg_err "Nginx 配置语法异常, 已跳过 nginx ${cn}, 可执行 nginx -t 查看详情"
-            rc=1
+        if [ -f "$NGINX_CONF" ]; then
+            if nginx -t >/dev/null 2>&1; then
+                systemctl "$action" nginx || { msg_err "nginx ${cn}失败"; rc=1; }
+            else
+                msg_err "Nginx 配置语法异常, 已跳过 nginx ${cn}, 可执行 nginx -t 查看详情"
+                rc=1
+            fi
+        fi
+        if [ -f "$CF_CONFIG" ]; then
+            systemctl "$action" cloudflared || { msg_err "cloudflared ${cn}失败, 排查: journalctl -u cloudflared -n 30"; rc=1; }
         fi
     fi
-    [ "$rc" -eq 0 ] && msg_ok "已${cn}所有服务 (Subconverter + Nginx)"
+    [ -f "$NGINX_CONF" ] && extra="$extra + Nginx"
+    [ -f "$CF_CONFIG" ]  && extra="$extra + Tunnel"
+    [ "$rc" -eq 0 ] && msg_ok "已${cn}所有已配置服务 (Subconverter${extra})"
     return "$rc"
 }
 
@@ -377,6 +404,11 @@ do_tunnel() {
     if [ -f "$CF_CONFIG" ]; then
         msg_warn "检测到已存在 Tunnel 配置: ${CF_CONFIG}"
         msg_info "继续将覆盖重建该配置 (同名隧道复用)"
+    fi
+    if [ -f "$NGINX_CONF" ]; then
+        msg_warn "检测到 Nginx 站点配置, Tunnel 模式无需 Nginx, 将停用并移除, 释放其占用的端口"
+        systemctl stop nginx 2>/dev/null
+        rm -f "$NGINX_CONF" "${NGINX_CONF}.bak"
     fi
     local cur_domain
     cur_domain="$(get_current_domain)"
@@ -448,7 +480,7 @@ EOF
     echo ""
     msg_ok "配置完成! 订阅转换地址:"
     msg_info "https://${REPLY_HOST}/sub?target=clash&url=<订阅链接>"
-    msg_info "Tunnel 无需公网标准端口, 原 http://<公网IP>:端口 入口仍然可用"
+    msg_info "Tunnel 纯出站连接, 不占用本机端口; 全程 HTTPS 加密"
 }
 
 # Tunnel 运行状态摘要 (供 do_status 调用, 未配置则静默跳过)
@@ -471,7 +503,7 @@ do_install() {
     echo "=================================================="
     echo "          Subconverter 安装向导 (NAT VPS 版)"
     echo "=================================================="
-    local mem disk_free cur_port cur_domain go=""
+    local mem disk_free cur_port cur_domain go="" mode=""
     mem="$(get_total_mem_mb)"
     disk_free="$(get_disk_free_mb)"
     msg_info "系统预检: 物理内存 ${mem}MB / 磁盘剩余 ${disk_free}MB / 架构 $(uname -m)"
@@ -484,42 +516,84 @@ do_install() {
         esac
     fi
     maybe_setup_swap
-    cur_port="$(get_current_port)";     [ -z "$cur_port" ]   && cur_port="$DEFAULT_NAT_PORT"
-    cur_domain="$(get_current_domain)"; [ -z "$cur_domain" ] && cur_domain="_"
     echo ""
-    msg_info "请输入 Nginx 本地监听端口 (请填入 NAT 服务商映射给您的内网端口)"
-    read_port "监听端口" "$cur_port"
-    read_domain "请输入反代绑定的域名 (若仅通过 IP:端口 访问请直接回车)" "$cur_domain"
-    echo ""
-    msg_info "安装参数: 端口=${REPLY_PORT} / 域名=${REPLY_DOMAIN} / 内部端口=${SUB_INTERNAL_PORT}"
-    echo ""
-    msg_info "[1/5] 安装系统依赖 (curl wget tar nginx)..."
-    install_deps
-    msg_info "[2/5] 下载 Subconverter 程序 ($(uname -m))..."
-    download_pkg
-    msg_info "[3/5] 解压部署到 ${INSTALL_DIR}..."
-    extract_pkg
-    msg_info "[4/5] 写入 Systemd 服务配置..."
-    write_systemd_unit
-    msg_info "[5/5] 写入 Nginx 反代配置并启动服务..."
-    write_nginx_conf
-    start_services
-    verify_service
-    echo ""
-    msg_ok "部署完成!"
-    msg_info "本机地址: http://<公网IP>:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
-    if [ -n "$REPLY_DOMAIN" ] && [ "$REPLY_DOMAIN" != "_" ]; then
-        msg_info "域名地址: http://${REPLY_DOMAIN}:${REPLY_PORT}/version (需域名托管到 Cloudflare)"
-    else
-        msg_info "部署验证: 浏览器访问 http://<公网IP>:${REPLY_PORT}/version 看到版本号即部署成功"
-    fi
-    msg_info "只能用http://<公网IP>:${REPLY_PORT} 访问, 不能用https://<公网IP>:${REPLY_PORT}/"
+    echo "  请选择对外接入方式:"
+    echo "   1. Cloudflare Tunnel (推荐) - HTTPS 加密, 无需公网标准端口,"
+    echo "      纯出站连接, 不占用本机任何监听端口, 不影响节点等已有服务"
+    echo "   2. Nginx 反代 (传统) - HTTP 明文, 需要 NAT 映射端口,"
+    echo "      注意: Nginx 会实际占用所填内网端口, 填错会抢占其他服务端口"
+    read -r -p "接入方式 [1/2] (默认: 1): " mode
+    case "$mode" in
+        2)
+            #--------- Nginx 反代模式 ---------#
+            cur_port="$(get_current_port)";     [ -z "$cur_port" ]   && cur_port="$DEFAULT_NAT_PORT"
+            cur_domain="$(get_current_domain)"; [ -z "$cur_domain" ] && cur_domain="_"
+            echo ""
+            msg_info "请输入 Nginx 本地监听端口"
+            msg_warn "务必确认该内网端口未被节点等其他服务占用, 否则会导致对应服务离线!"
+            read_port "监听端口" "$cur_port"
+            read_domain "请输入反代绑定的域名 (若仅通过 IP:端口 访问请直接回车)" "$cur_domain"
+            echo ""
+            msg_info "安装参数: 端口=${REPLY_PORT} / 域名=${REPLY_DOMAIN} / 内部端口=${SUB_INTERNAL_PORT}"
+            echo ""
+            msg_info "[1/6] 安装核心依赖 (curl wget tar)..."
+            install_deps
+            msg_info "[2/6] 安装 Nginx..."
+            install_nginx
+            msg_info "[3/6] 下载 Subconverter 程序 ($(uname -m))..."
+            download_pkg
+            msg_info "[4/6] 解压部署到 ${INSTALL_DIR}..."
+            extract_pkg
+            msg_info "[5/6] 写入 Systemd 服务配置..."
+            write_systemd_unit
+            msg_info "[6/6] 写入 Nginx 反代配置并启动服务..."
+            write_nginx_conf
+            start_services
+            verify_service
+            echo ""
+            msg_ok "部署完成!"
+            msg_info "本机地址: http://<公网IP>:${REPLY_PORT}/ (对外请使用 NAT 服务商映射的公网地址)"
+            if [ -n "$REPLY_DOMAIN" ] && [ "$REPLY_DOMAIN" != "_" ]; then
+                msg_info "域名地址: http://${REPLY_DOMAIN}:${REPLY_PORT}/version (需域名托管到 Cloudflare)"
+            else
+                msg_info "部署验证: 浏览器访问 http://<公网IP>:${REPLY_PORT}/version 看到版本号即部署成功"
+            fi
+            msg_info "只能用http://<公网IP>:${REPLY_PORT} 访问, 不能用https://<公网IP>:${REPLY_PORT}/"
+            ;;
+        ""|1|y|Y)
+            #--------- Cloudflare Tunnel 模式 (默认) ---------#
+            if [ -f "$NGINX_CONF" ]; then
+                msg_warn "检测到旧 Nginx 站点配置, Tunnel 模式下将停用并移除, 避免继续占用端口"
+                systemctl stop nginx 2>/dev/null
+                rm -f "$NGINX_CONF" "${NGINX_CONF}.bak"
+            fi
+            echo ""
+            msg_info "[1/4] 安装核心依赖 (curl wget tar)..."
+            install_deps
+            msg_info "[2/4] 下载 Subconverter 程序 ($(uname -m))..."
+            download_pkg
+            msg_info "[3/4] 解压部署到 ${INSTALL_DIR}..."
+            extract_pkg
+            msg_info "[4/4] 写入 Systemd 服务配置并启动..."
+            write_systemd_unit
+            start_services
+            verify_service
+            echo ""
+            msg_ok "Subconverter 部署完成! 本模式不安装、不启动 Nginx, 不会占用节点端口"
+            msg_info "下一步: 主菜单选 9 配置 Cloudflare Tunnel, 即可获得 HTTPS 访问地址"
+            ;;
+        *)
+            msg_warn "无效选择, 已取消安装"
+            return 1
+            ;;
+    esac
 }
 
 # 选项 2: 查看服务运行状态与内存占用
 do_status() {
-    local svc pid rss
-    for svc in "$SERVICE_NAME" nginx; do
+    local svc pid rss svcs=("$SERVICE_NAME")
+    [ -f "$NGINX_CONF" ] && svcs+=("nginx")
+    for svc in "${svcs[@]}"; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             pid="$(systemctl show -p MainPID --value "$svc" 2>/dev/null)"
             rss="$(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%.1f", $1/1024}')"
@@ -548,7 +622,11 @@ do_status() {
 # 选项 6: 修改配置 (NAT 监听端口 / 绑定域名)
 do_modify() {
     if [ ! -f "$NGINX_CONF" ]; then
-        msg_err "尚未安装本套件, 请先执行安装 (选项 1)"
+        if [ -f "$CF_CONFIG" ]; then
+            msg_err "当前为 Cloudflare Tunnel 模式, 无 Nginx 配置可改; 修改域名请使用菜单 9 重新配置"
+        else
+            msg_err "尚未安装本套件, 请先执行安装 (选项 1)"
+        fi
         return 1
     fi
     local cur_port cur_domain

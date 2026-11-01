@@ -8,10 +8,10 @@ journalctl -u subconverter -f
 
 # NAT-Subconverter-Nginx 一键交互式部署脚本
 
-针对**小内存（≤512MB）、小硬盘（1~5GB）、无标准 Web 端口的 NAT VPS**，通过纯 Bash 脚本以交互式方式完成 Subconverter 后端及 Nginx 反代的极简部署与生命周期管理。
+针对**小内存（≤512MB）、小硬盘（1~5GB）、无标准 Web 端口的 NAT VPS**，通过纯 Bash 脚本以交互式方式完成 Subconverter 后端的极简部署与生命周期管理，支持 **Cloudflare Tunnel（HTTPS，推荐）** 与 **Nginx 反代（HTTP）** 两种对外接入方式。
 
 > 程序来源：[asdlokj1qpi233/subconverter](https://github.com/asdlokj1qpi233/subconverter)（支持 anytls / mieru / hy2 / hy / vless）
-> 部署方式：二进制部署 + Systemd 守护 + Nginx 反代，**全程不依赖 Docker**
+> 部署方式：二进制部署 + Systemd 守护 + Cloudflare Tunnel / Nginx 反代，**全程不依赖 Docker**
 
 ---
 
@@ -71,23 +71,40 @@ wget -qO sub_mgr.sh https://ghfast.top/https://raw.githubusercontent.com/chengeg
 
 ## 安装向导说明
 
+安装向导第一步选择**对外接入方式**：
+
+| 模式 | 说明 | 特点 |
+|---|---|---|
+| 1. Cloudflare Tunnel（默认，推荐） | 只装 Subconverter 本体，随后用菜单 `9` 接入隧道 | HTTPS 加密；纯出站连接，**不占用本机任何监听端口**，不影响节点等已有服务 |
+| 2. Nginx 反代（传统） | 装 Nginx 并反代到后端 | HTTP 明文；需要 NAT 映射端口 |
+
+> ⚠️ **Nginx 模式端口警示**：Nginx 会实际绑定所填的内网监听端口。如果误填了节点等其他服务正在使用的端口（如 NAT 映射给节点隧道的内网端口），会导致对应服务离线。请只填写确认空闲的端口，禁止使用 25500（Subconverter 内部端口）。
+
+Nginx 模式的交互步骤：
+
 | 步骤 | 说明 | 默认值 |
 |---|---|---|
 | 创建 Swap | 物理内存 ≤ 256MB 且无 Swap 时提示，防 OOM 崩溃 | Y（创建 512MB） |
-| NAT 监听端口 | 填写 **NAT 服务商映射给您的内网端口**，禁止使用 25500 | 25580 |
+| NAT 监听端口 | 填写 **确认空闲的内网端口**，禁止使用 25500 | 25580 |
 | 绑定域名 | 仅通过 `IP:端口` 访问直接回车 | `_` |
 
 安装内容：
 
-1. 仅安装 `curl wget tar nginx`，完成后立即清理 apt 缓存防爆盘；
+1. 核心依赖仅装 `curl wget tar`（Nginx 模式额外装 nginx），完成后立即清理 apt 缓存防爆盘；
 2. 按 CPU 架构下载 Subconverter 预编译包（3 次重试 + 完整性校验），解压至 `/opt/subconverter` 并立即删除安装包；
 3. 写入 Systemd 服务（`Restart=always`，异常 5 秒自动拉起）；
-4. 写入 Nginx 反代（关闭 access_log、error 级别 crit、请求体限制 10M），`nginx -t` 通过后启动；
-5. 自动执行 `curl -I` 本地连通性验证。
+4. Nginx 模式写入反代配置（关闭 access_log、error 级别 crit、请求体限制 10M），`nginx -t` 通过后启动；
+5. 自动访问 `127.0.0.1:25500/version` 做本地连通性验证（两种模式通用）。
 
 ## 使用示例
 
-安装完成后，订阅转换请求格式：
+**Tunnel 模式**（推荐，配好菜单 `9` 后）：
+
+```
+https://<您的域名>/sub?target=clash&url=<订阅链接>
+```
+
+**Nginx 模式**：
 
 ```
 http://<公网地址>:<公网端口>/sub?target=clash&url=<订阅链接>
@@ -124,8 +141,7 @@ http://<公网地址>:<公网端口>/sub?target=clash&url=<订阅链接>
 ### 使用效果
 
 - 订阅地址：`https://<您的域名>/sub?target=clash&url=<订阅链接>`
-- 原 `http://<公网IP>:<公网端口>` 入口依然保留可用
-- Tunnel 直连 Subconverter 内部端口 25500，不经过 Nginx；若不再需要 Nginx，可用菜单 `4` 停止以节省约 10MB 内存
+- Tunnel 直连 Subconverter 内部端口 25500，不经过 Nginx；配置时若检测到旧 Nginx 站点配置，会**自动停用并删除**，释放其占用的端口（避免抢占节点端口导致离线）
 - 菜单 `2` 状态页会显示 Tunnel 运行状态
 
 ### 常见问题
