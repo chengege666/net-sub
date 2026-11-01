@@ -25,10 +25,8 @@ SWAP_FSTAB_TAG="nat-sub-mgr"                                # fstab 标记 (用�
 TMP_FILE="/tmp/subconverter_pkg.tar.gz"                     # 安装包临时下载路径
 EXTRACT_TMP="/opt/.subconverter_tmp"                        # 解压临时目录
 CF_BIN="/usr/local/bin/cloudflared"                         # Cloudflare Tunnel 客户端路径
-CF_CONFIG="/etc/cloudflared/net-sub.yml"                    # Tunnel 专用配置文件 (独立文件, 不碰共享 config.yml)
-CF_SERVICE="net-sub-tunnel"                                 # Tunnel 专用 Systemd 服务名 (不与节点 cloudflared.service 冲突)
-CF_UNIT="/etc/systemd/system/${CF_SERVICE}.service"         # Tunnel 专用服务单元路径
-CF_HOME="${HOME:-/root}/.cloudflared"                       # cloudflared 凭据目录 (cert.pem 为登录凭据, 与节点共用无冲突)
+CF_CONFIG="/etc/cloudflared/config.yml"                     # Tunnel 配置文件路径
+CF_HOME="${HOME:-/root}/.cloudflared"                       # cloudflared 凭据目录
 TUNNEL_NAME="net-sub"                                       # 脚本创建的隧道名称
 
 #--------------------------- 输出辅助 ---------------------------#
@@ -290,9 +288,9 @@ start_services() {
         msg_ok "Nginx 已启动并监听端口 $(get_current_port)"
     fi
     if [ -f "$CF_CONFIG" ] && command -v cloudflared >/dev/null 2>&1; then
-        systemctl enable "$CF_SERVICE" >/dev/null 2>&1
-        systemctl restart "$CF_SERVICE" 2>/dev/null \
-            || msg_warn "隧道服务重启失败, 可执行: journalctl -u ${CF_SERVICE} -n 30 排查"
+        systemctl enable cloudflared >/dev/null 2>&1
+        systemctl restart cloudflared 2>/dev/null \
+            || msg_warn "cloudflared 重启失败, 可执行: journalctl -u cloudflared -n 30 排查"
     fi
 }
 
@@ -320,7 +318,7 @@ svc_action() {
     if [ "$action" = "stop" ]; then
         systemctl stop "$SERVICE_NAME" 2>/dev/null || { msg_err "subconverter 停止失败"; rc=1; }
         [ -f "$NGINX_CONF" ] && { systemctl stop nginx 2>/dev/null || { msg_err "nginx 停止失败"; rc=1; }; }
-        [ -f "$CF_CONFIG" ]  && { systemctl stop "$CF_SERVICE" 2>/dev/null || { msg_err "隧道服务停止失败"; rc=1; }; }
+        [ -f "$CF_CONFIG" ]  && { systemctl stop cloudflared 2>/dev/null || { msg_err "cloudflared 停止失败"; rc=1; }; }
     else
         systemctl "$action" "$SERVICE_NAME" \
             || { msg_err "subconverter ${cn}失败, 可执行: journalctl -u ${SERVICE_NAME} -n 20 排查"; rc=1; }
@@ -333,7 +331,7 @@ svc_action() {
             fi
         fi
         if [ -f "$CF_CONFIG" ]; then
-            systemctl "$action" "$CF_SERVICE" || { msg_err "隧道服务 ${cn}失败, 排查: journalctl -u ${CF_SERVICE} -n 30"; rc=1; }
+            systemctl "$action" cloudflared || { msg_err "cloudflared ${cn}失败, 排查: journalctl -u cloudflared -n 30"; rc=1; }
         fi
     fi
     [ -f "$NGINX_CONF" ] && extra="$extra + Nginx"
@@ -394,27 +392,6 @@ tunnel_ensure_login() {
     cloudflared tunnel login || die "cloudflared 登录失败, 请重试"
     cloudflared tunnel list >/dev/null 2>&1 || die "登录凭据未生效, 请重新完成浏览器授权"
     msg_ok "Cloudflare 登录状态正常"
-}
-
-# 隧道专用 Systemd 单元 (独立服务名, 加载独立配置文件, 与节点可能在用的 cloudflared.service 互不干扰)
-write_tunnel_unit() {
-    mkdir -p /etc/cloudflared
-    cat > "$CF_UNIT" <<EOF
-[Unit]
-Description=Net-Sub Cloudflare Tunnel
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${CF_BIN} tunnel --no-autoupdate --config ${CF_CONFIG} run
-Restart=always
-RestartSec=5
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-EOF
 }
 
 # 选项 9: 配置 Cloudflare Tunnel 实现 HTTPS 加密访问 (无需公网标准端口)
@@ -488,13 +465,11 @@ EOF
         return 1
     fi
 
-    # 注册为独立开机自启服务 (专用服务名与专用配置文件, 不触碰节点可能在用的 cloudflared.service / config.yml)
-    msg_info "写入隧道专用服务 ${CF_SERVICE} ..."
-    write_tunnel_unit
-    systemctl daemon-reload
-    systemctl enable "$CF_SERVICE" >/dev/null 2>&1
-    systemctl restart "$CF_SERVICE" || die "隧道服务启动失败, 排查: journalctl -u ${CF_SERVICE} -n 30"
-    msg_ok "隧道服务 ${CF_SERVICE} 已运行"
+    # 注册为开机自启服务并启动
+    msg_info "安装 cloudflared 系统服务 ..."
+    cloudflared service install >/dev/null 2>&1 || msg_warn "service install 返回异常, 继续尝试启动"
+    systemctl restart cloudflared || die "cloudflared 服务启动失败, 排查: journalctl -u cloudflared -n 30"
+    msg_ok "cloudflared 服务已运行"
 
     # 端到端验证
     echo ""
@@ -506,7 +481,7 @@ EOF
         msg_ok "HTTPS 接入成功: https://${REPLY_HOST}/version -> 后端版本 ${version}"
     else
         msg_warn "验证暂未通过 (DNS 生效或隧道建立可能有延迟, 稍后再试)"
-        msg_info "排查: systemctl status ${CF_SERVICE} / journalctl -u ${CF_SERVICE} -n 30"
+        msg_info "排查: systemctl status cloudflared / journalctl -u cloudflared -n 30"
     fi
     echo ""
     msg_ok "配置完成! 订阅转换地址:"
@@ -525,7 +500,7 @@ tunnel_status_line() {
     [ -f "$CF_CONFIG" ] || return 0
     local host state
     host="$(get_tunnel_host)"
-    if systemctl is-active --quiet "$CF_SERVICE" 2>/dev/null; then
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then
         state="运行中"
     else
         state="未运行"
@@ -539,9 +514,9 @@ do_restart_tunnel() {
         msg_err "尚未配置 Cloudflare Tunnel, 请先执行选项 9"
         return 1
     fi
-    msg_info "重启隧道服务 ${CF_SERVICE} ..."
-    systemctl restart "$CF_SERVICE" \
-        || die "隧道服务重启失败, 排查: journalctl -u ${CF_SERVICE} -n 30"
+    msg_info "重启 cloudflared 隧道服务 ..."
+    systemctl restart cloudflared \
+        || die "cloudflared 重启失败, 排查: journalctl -u cloudflared -n 30"
     msg_ok "隧道服务已重启"
     sleep 5
     local host version
@@ -728,11 +703,11 @@ do_uninstall() {
     esac
     systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1
     systemctl disable --now nginx >/dev/null 2>&1
-    if [ -f "$CF_CONFIG" ] || [ -f "$CF_UNIT" ]; then
-        systemctl disable --now "$CF_SERVICE" >/dev/null 2>&1
-        rm -f "$CF_CONFIG" "$CF_UNIT"
-        systemctl daemon-reload
-        msg_ok "已清理隧道专用服务与配置 (节点的 cloudflared 服务如有运行不受影响; 云端隧道不再使用请自行到 Cloudflare 控制台删除)"
+    if [ -f "$CF_CONFIG" ] || command -v cloudflared >/dev/null 2>&1; then
+        systemctl disable --now cloudflared >/dev/null 2>&1
+        cloudflared service uninstall >/dev/null 2>&1
+        rm -f "$CF_CONFIG"
+        msg_ok "已清理 Tunnel 本地配置 (云端隧道如不再使用, 请到 Cloudflare 控制台删除)"
     fi
     rm -rf "$INSTALL_DIR"
     rm -f "$NGINX_CONF" "${NGINX_CONF}.bak" "$SYSTEMD_UNIT"
