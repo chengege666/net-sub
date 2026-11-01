@@ -61,6 +61,7 @@ wget -qO sub_mgr.sh https://ghfast.top/https://raw.githubusercontent.com/chengeg
  7. 一键完全卸载 (清理所有文件与配置)
  8. 更新 Subconverter 程序
  9. 配置 Cloudflare Tunnel (HTTPS 加密访问)
+ 10. 重启 Cloudflare Tunnel 隧道
  0. 退出脚本
 ==================================================
 ```
@@ -142,7 +143,9 @@ http://<公网地址>:<公网端口>/sub?target=clash&url=<订阅链接>
 
 - 订阅地址：`https://<您的域名>/sub?target=clash&url=<订阅链接>`
 - Tunnel 直连 Subconverter 内部端口 25500，不经过 Nginx；配置时若检测到旧 Nginx 站点配置，会**自动停用并删除**，释放其占用的端口（避免抢占节点端口导致离线）
-- 菜单 `2` 状态页会显示 Tunnel 运行状态
+- 菜单 `2` 状态页会显示 Tunnel 运行状态；菜单 `10` 可单独重启隧道服务（含 https 自动验证）
+
+> ⚠️ **与节点服务的域名冲突警示**：`route dns` 会接管所填主机名的解析。如果该子域名同时被您的节点服务使用（如节点 over WebSocket+TLS 也解析到同一主机名），绑定隧道会抢占其 DNS 记录，导致**节点离线**。请务必为订阅转换使用与节点错开的独立子域名。此外，脚本的启停/重启选项只管理 Subconverter、Nginx 与 cloudflared，**不会操作您的节点进程**；节点若因端口被占而离线，需在停掉 Nginx 后到节点面板/客户端单独重启。
 
 ### 常见问题
 

@@ -414,6 +414,12 @@ do_tunnel() {
     cur_domain="$(get_current_domain)"
     [ "$cur_domain" = "_" ] && cur_domain=""
     read_tunnel_host "$cur_domain"
+    echo ""
+    msg_warn "重要: Tunnel 会接管您所填域名的全部解析流量!"
+    msg_warn "若该子域名同时被您的节点服务使用 (如节点 over WebSocket+TLS 也解析到此域名),"
+    msg_warn "绑定隧道会抢占其 DNS 记录, 导致【节点离线】!"
+    msg_info "请务必为订阅转换使用与节点错开的独立子域名 (如节点用 a.xxx.com, 转换用 b.xxx.com)"
+    echo ""
     ensure_cloudflared
     tunnel_ensure_login
 
@@ -483,17 +489,49 @@ EOF
     msg_info "Tunnel 纯出站连接, 不占用本机端口; 全程 HTTPS 加密"
 }
 
+# 读取已配置的 Tunnel 主机名 (无配置返回空)
+get_tunnel_host() {
+    [ -f "$CF_CONFIG" ] || return 0
+    sed -n 's/^[[:space:]]*hostname:[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$CF_CONFIG" | head -n 1
+}
+
 # Tunnel 运行状态摘要 (供 do_status 调用, 未配置则静默跳过)
 tunnel_status_line() {
     [ -f "$CF_CONFIG" ] || return 0
     local host state
-    host="$(sed -n 's/^[[:space:]]*hostname:[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$CF_CONFIG" | head -n 1)"
+    host="$(get_tunnel_host)"
     if systemctl is-active --quiet cloudflared 2>/dev/null; then
         state="运行中"
     else
         state="未运行"
     fi
     msg_info "Cloudflare Tunnel: ${state} (https://${host:-未知域名}/version)"
+}
+
+# 选项 10: 重启 Cloudflare Tunnel 隧道服务
+do_restart_tunnel() {
+    if [ ! -f "$CF_CONFIG" ]; then
+        msg_err "尚未配置 Cloudflare Tunnel, 请先执行选项 9"
+        return 1
+    fi
+    msg_info "重启 cloudflared 隧道服务 ..."
+    systemctl restart cloudflared \
+        || die "cloudflared 重启失败, 排查: journalctl -u cloudflared -n 30"
+    msg_ok "隧道服务已重启"
+    sleep 5
+    local host version
+    host="$(get_tunnel_host)"
+    if [ -n "$host" ]; then
+        version="$(curl -s --connect-timeout 10 --max-time 20 "https://${host}/version" | tr -d '\r\n')"
+        if [ -n "$version" ]; then
+            msg_ok "验证通过: https://${host}/version -> 后端版本 ${version}"
+        else
+            msg_warn "https 暂未验证成功 (隧道重建有延迟, 稍后重试或执行菜单 2 查看状态)"
+        fi
+    fi
+    echo ""
+    msg_info "提示: 本选项只重启订阅转换的 Tunnel, 不管理您的节点服务"
+    msg_info "若节点隧道之前离线, 请在节点面板/客户端单独重启节点进程"
 }
 
 #--------------------------- 功能选项 ---------------------------#
@@ -770,6 +808,7 @@ show_menu() {
     echo " 7. 一键完全卸载 (清理所有文件与配置)"
     echo " 8. 更新 Subconverter 程序"
     echo " 9. 配置 Cloudflare Tunnel (HTTPS 加密访问)"
+    echo " 10. 重启 Cloudflare Tunnel 隧道"
     echo " 0. 退出脚本"
     echo "=================================================="
 }
@@ -784,7 +823,7 @@ main() {
     while :; do
         show_menu
         local choice=""
-        read -r -p "请输入选项编号 [0-9]: " choice
+        read -r -p "请输入选项编号 [0-10]: " choice
         case "$choice" in
             1) do_install ;;
             2) do_status ;;
@@ -795,8 +834,9 @@ main() {
             7) do_uninstall ;;
             8) do_update ;;
             9) do_tunnel ;;
+            10) do_restart_tunnel ;;
             0) msg_info "再见"; exit 0 ;;
-            *) msg_warn "无效选项, 请输入 0-9" ;;
+            *) msg_warn "无效选项, 请输入 0-10" ;;
         esac
         echo ""
         read -r -p "按回车键返回主菜单..." _
