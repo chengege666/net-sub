@@ -119,6 +119,8 @@ http://<公网地址>:<公网端口>/sub?target=clash&url=<订阅链接>
 
 主菜单选 `9`，脚本自动完成 cloudflared 安装、隧道创建、DNS 绑定与服务注册，让订阅地址从 `http://` 升级为 `https://`，**无需公网标准端口**（NAT 高位端口也能用）。
 
+> ✅ **与节点隧道共存**：若您的节点本身也用 cloudflared 实现（如面板的"隧道入站"节点），本脚本采用**完全隔离**设计——独立配置文件 `net-sub.yml`、独立 systemd 服务 `net-sub-tunnel.service`，**不会覆盖或重启节点正在使用的共享 `config.yml` 和 `cloudflared.service`**。只需再注意子域名不与节点解析记录重名即可。
+
 ### 前提条件
 
 1. 拥有一个域名，且已托管到 Cloudflare（免费版即可）；
@@ -173,7 +175,8 @@ nginx -t                          # Nginx 配置语法检查
 | `/var/log/nginx/sub_error.log` | Nginx 错误日志（仅记录 crit 级别） |
 | `/swapfile` | 脚本创建的虚拟内存（卸载时自动移除） |
 | `/usr/local/bin/cloudflared` | Tunnel 客户端程序（仅使用选项 9 时存在） |
-| `/etc/cloudflared/config.yml` | Tunnel 转发配置（卸载时自动移除） |
+| `/etc/cloudflared/net-sub.yml` | Tunnel 专用转发配置（独立文件，不与节点共享 config.yml；卸载时自动移除） |
+| `/etc/systemd/system/net-sub-tunnel.service` | Tunnel 专用服务单元（独立服务名，不影响节点自身的 cloudflared.service） |
 | `/root/.cloudflared/` | Cloudflare 登录凭据与隧道密钥（卸载时保留，需自行删除） |
 
 ## 完全卸载
