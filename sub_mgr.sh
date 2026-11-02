@@ -427,9 +427,19 @@ do_tunnel() {
     local uuid cred_file create_out
     uuid="$(cloudflared tunnel list 2>/dev/null | awk -v n="$TUNNEL_NAME" '$2==n {print $1; exit}')"
     if [ -n "$uuid" ]; then
-        msg_ok "复用已有隧道 ${TUNNEL_NAME} (${uuid})"
+        # 复用前必须确认本机存在隧道密钥: 密钥只在创建隧道的那台机器落盘, 云端无法下载
         cred_file="$(ls -1 "${CF_HOME}/${uuid}.json" 2>/dev/null | head -n 1)"
-        [ -n "$cred_file" ] || cred_file="${CF_HOME}/${uuid}.json"
+        if [ -z "$cred_file" ] || [ ! -f "$cred_file" ]; then
+            msg_err "云端存在同名隧道 ${TUNNEL_NAME} (${uuid}), 但本机缺少隧道密钥文件:"
+            msg_err "  ${CF_HOME}/${uuid}.json"
+            msg_info "该隧道多半创建于其他机器/旧环境, 密钥无法找回, 复用必然导致 cloudflared 启动失败"
+            msg_info "处置指引 (本机改名让位, 不销毁云端隧道):"
+            msg_info "  1) cloudflared tunnel rename ${TUNNEL_NAME} ${TUNNEL_NAME}-dead"
+            msg_info "  2) 重新运行本向导 (菜单 9), 将自动创建带本地密钥的新隧道"
+            msg_info "  3) 若 DNS 绑定报记录已存在, 到 Cloudflare 控制台删除旧 CNAME 后重试"
+            die "缺少本地隧道密钥, 已终止 (未写入配置, 未改动 DNS)"
+        fi
+        msg_ok "复用已有隧道 ${TUNNEL_NAME} (${uuid})"
     else
         msg_info "创建隧道 ${TUNNEL_NAME} ..."
         create_out="$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1)" \
@@ -465,10 +475,15 @@ EOF
         return 1
     fi
 
-    # 注册为开机自启服务并启动
+    # 注册为开机自启服务并启动 (保留真实报错, 不再丢弃 stderr)
     msg_info "安装 cloudflared 系统服务 ..."
-    cloudflared service install >/dev/null 2>&1 || msg_warn "service install 返回异常, 继续尝试启动"
-    systemctl restart cloudflared || die "cloudflared 服务启动失败, 排查: journalctl -u cloudflared -n 30"
+    local svc_out
+    svc_out="$(cloudflared service install 2>&1)" || msg_warn "service install 返回异常: ${svc_out}"
+    if ! systemctl restart cloudflared; then
+        msg_err "cloudflared 服务启动失败, 最近日志:"
+        journalctl -u cloudflared -n 15 --no-pager 2>/dev/null
+        die "排查建议: systemctl status cloudflared / journalctl -u cloudflared -n 30"
+    fi
     msg_ok "cloudflared 服务已运行"
 
     # 端到端验证
