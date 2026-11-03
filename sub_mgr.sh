@@ -28,6 +28,7 @@ CF_BIN="/usr/local/bin/cloudflared"                         # Cloudflare Tunnel 
 CF_CONFIG="/etc/cloudflared/config.yml"                     # Tunnel 配置文件路径
 CF_HOME="${HOME:-/root}/.cloudflared"                       # cloudflared 凭据目录
 TUNNEL_NAME="net-sub"                                       # 脚本创建的隧道名称
+CF_HOST_FILE="/etc/cloudflared/.net-sub-host"               # Token 模式下记录对外域名的文件
 
 #--------------------------- 输出辅助 ---------------------------#
 C_RED='\033[31m'; C_GREEN='\033[32m'; C_YELLOW='\033[33m'; C_BLUE='\033[34m'; C_RESET='\033[0m'
@@ -57,9 +58,14 @@ has_swap() {
     [ "$(grep -c . /proc/swaps 2>/dev/null)" -gt 1 ]
 }
 
+# 是否已配置 Tunnel (本地 config.yml 模式或 Token 手动模式至少其一)
+tunnel_configured() {
+    [ -f "$CF_CONFIG" ] || [ -f "$CF_HOST_FILE" ]
+}
+
 # 是否已安装本套件 (程序存在, 且 Nginx 反代配置或 Tunnel 配置至少其一)
 is_installed() {
-    [ -x "${INSTALL_DIR}/subconverter" ] && { [ -f "${NGINX_CONF}" ] || [ -f "${CF_CONFIG}" ]; }
+    [ -x "${INSTALL_DIR}/subconverter" ] && { [ -f "${NGINX_CONF}" ] || tunnel_configured; }
 }
 
 #--------------------------- 交互输入 ---------------------------#
@@ -287,7 +293,7 @@ start_services() {
         systemctl restart nginx || die "Nginx 启动失败"
         msg_ok "Nginx 已启动并监听端口 $(get_current_port)"
     fi
-    if [ -f "$CF_CONFIG" ] && command -v cloudflared >/dev/null 2>&1; then
+    if tunnel_configured && command -v cloudflared >/dev/null 2>&1; then
         systemctl enable cloudflared >/dev/null 2>&1
         systemctl restart cloudflared 2>/dev/null \
             || msg_warn "cloudflared 重启失败, 可执行: journalctl -u cloudflared -n 30 排查"
@@ -318,7 +324,7 @@ svc_action() {
     if [ "$action" = "stop" ]; then
         systemctl stop "$SERVICE_NAME" 2>/dev/null || { msg_err "subconverter 停止失败"; rc=1; }
         [ -f "$NGINX_CONF" ] && { systemctl stop nginx 2>/dev/null || { msg_err "nginx 停止失败"; rc=1; }; }
-        [ -f "$CF_CONFIG" ]  && { systemctl stop cloudflared 2>/dev/null || { msg_err "cloudflared 停止失败"; rc=1; }; }
+        tunnel_configured    && { systemctl stop cloudflared 2>/dev/null || { msg_err "cloudflared 停止失败"; rc=1; }; }
     else
         systemctl "$action" "$SERVICE_NAME" \
             || { msg_err "subconverter ${cn}失败, 可执行: journalctl -u ${SERVICE_NAME} -n 20 排查"; rc=1; }
@@ -330,12 +336,12 @@ svc_action() {
                 rc=1
             fi
         fi
-        if [ -f "$CF_CONFIG" ]; then
+        if tunnel_configured; then
             systemctl "$action" cloudflared || { msg_err "cloudflared ${cn}失败, 排查: journalctl -u cloudflared -n 30"; rc=1; }
         fi
     fi
     [ -f "$NGINX_CONF" ] && extra="$extra + Nginx"
-    [ -f "$CF_CONFIG" ]  && extra="$extra + Tunnel"
+    tunnel_configured    && extra="$extra + Tunnel"
     [ "$rc" -eq 0 ] && msg_ok "已${cn}所有已配置服务 (Subconverter${extra})"
     return "$rc"
 }
@@ -394,97 +400,82 @@ tunnel_ensure_login() {
     msg_ok "Cloudflare 登录状态正常"
 }
 
-# 选项 9: 配置 Cloudflare Tunnel 实现 HTTPS 加密访问 (无需公网标准端口)
+# 读取 Tunnel Token (手动输入, 非空校验), 校验通过后写入全局变量 REPLY_TOKEN
+read_tunnel_token() {
+    local input
+    while :; do
+        read -r -p "请粘贴 Tunnel Token (eyJ 开头的一长串字符): " input
+        input="$(echo "$input" | tr -d '[:space:]')"
+        if [ -z "$input" ]; then
+            msg_warn "Token 不能为空, 请重新输入"
+            continue
+        fi
+        REPLY_TOKEN="$input"
+        return 0
+    done
+}
+
+# 选项 9: 配置 Cloudflare Tunnel 实现 HTTPS 加密访问 (Token 手动接入, 无需公网标准端口)
 do_tunnel() {
     echo ""
     echo "=================================================="
-    echo "     Cloudflare Tunnel HTTPS 接入向导"
+    echo "   Cloudflare Tunnel HTTPS 接入向导 (Token 模式)"
     echo "=================================================="
     msg_info "适用: NAT VPS 公网端口非 Cloudflare 标准端口时, 通过出站隧道实现 https 访问"
-    if [ -f "$CF_CONFIG" ]; then
-        msg_warn "检测到已存在 Tunnel 配置: ${CF_CONFIG}"
-        msg_info "继续将覆盖重建该配置 (同名隧道复用)"
+    if tunnel_configured; then
+        msg_warn "检测到已存在 Tunnel 配置, 继续将卸载旧服务并切换为 Token 模式重建"
     fi
     if [ -f "$NGINX_CONF" ]; then
         msg_warn "检测到 Nginx 站点配置, Tunnel 模式无需 Nginx, 将停用并移除, 释放其占用的端口"
         systemctl stop nginx 2>/dev/null
         rm -f "$NGINX_CONF" "${NGINX_CONF}.bak"
     fi
-    local cur_domain
-    cur_domain="$(get_current_domain)"
-    [ "$cur_domain" = "_" ] && cur_domain=""
-    read_tunnel_host "$cur_domain"
+    echo ""
+    msg_info "请先在 Cloudflare 控制台完成以下手动操作:"
+    msg_info "  1) 打开 https://one.dash.cloudflare.com/ -> Networks -> Tunnels -> Create a tunnel"
+    msg_info "  2) 类型选 cloudflared, 命名后, 复制安装命令中的 Token (eyJ 开头的一长串字符)"
+    msg_info "  3) 在 Public Hostname 页面添加: 子域名 + 域名, Service 选 HTTP, URL 填 localhost:${SUB_INTERNAL_PORT}"
+    msg_info "     (该步骤会自动添加 DNS 记录, 无需脚本绑定)"
     echo ""
     msg_warn "重要: Tunnel 会接管您所填域名的全部解析流量!"
     msg_warn "若该子域名同时被您的节点服务使用 (如节点 over WebSocket+TLS 也解析到此域名),"
     msg_warn "绑定隧道会抢占其 DNS 记录, 导致【节点离线】!"
     msg_info "请务必为订阅转换使用与节点错开的独立子域名 (如节点用 a.xxx.com, 转换用 b.xxx.com)"
     echo ""
+
+    # 输入域名 (用于状态显示与完成后的 https 验证)
+    local cur_domain
+    cur_domain="$(get_current_domain)"
+    [ "$cur_domain" = "_" ] && cur_domain=""
+    read_tunnel_host "$cur_domain"
+    # 输入 Token
+    local REPLY_TOKEN=""
+    read_tunnel_token
+
     ensure_cloudflared
-    tunnel_ensure_login
 
-    # 复用同名隧道或创建新隧道
-    local uuid cred_file create_out
-    uuid="$(cloudflared tunnel list 2>/dev/null | awk -v n="$TUNNEL_NAME" '$2==n {print $1; exit}')"
-    if [ -n "$uuid" ]; then
-        # 复用前必须确认本机存在隧道密钥: 密钥只在创建隧道的那台机器落盘, 云端无法下载
-        cred_file="$(ls -1 "${CF_HOME}/${uuid}.json" 2>/dev/null | head -n 1)"
-        if [ -z "$cred_file" ] || [ ! -f "$cred_file" ]; then
-            msg_err "云端存在同名隧道 ${TUNNEL_NAME} (${uuid}), 但本机缺少隧道密钥文件:"
-            msg_err "  ${CF_HOME}/${uuid}.json"
-            msg_info "该隧道多半创建于其他机器/旧环境, 密钥无法找回, 复用必然导致 cloudflared 启动失败"
-            msg_info "处置指引 (本机改名让位, 不销毁云端隧道):"
-            msg_info "  1) cloudflared tunnel rename ${TUNNEL_NAME} ${TUNNEL_NAME}-dead"
-            msg_info "  2) 重新运行本向导 (菜单 9), 将自动创建带本地密钥的新隧道"
-            msg_info "  3) 若 DNS 绑定报记录已存在, 到 Cloudflare 控制台删除旧 CNAME 后重试"
-            die "缺少本地隧道密钥, 已终止 (未写入配置, 未改动 DNS)"
-        fi
-        msg_ok "复用已有隧道 ${TUNNEL_NAME} (${uuid})"
-    else
-        msg_info "创建隧道 ${TUNNEL_NAME} ..."
-        create_out="$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1)" \
-            || { msg_err "${create_out}"; die "隧道创建失败"; }
-        uuid="$(echo "$create_out" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n 1)"
-        cred_file="$(echo "$create_out" | grep -oE '/[^[:space:]]*\.json' | head -n 1)"
-        [ -n "$uuid" ] || die "未能从输出中解析隧道 UUID, 请手动执行 cloudflared tunnel list 查看"
-        [ -n "$cred_file" ] || cred_file="${CF_HOME}/${uuid}.json"
-        msg_ok "隧道已创建: ${uuid}"
-    fi
+    # 清理旧配置与服务残留 (自动模式或历史 Token 安装)
+    msg_info "清理旧 Tunnel 本地配置 ..."
+    systemctl stop cloudflared 2>/dev/null
+    cloudflared service uninstall >/dev/null 2>&1
+    rm -f "$CF_CONFIG" "$CF_HOST_FILE"
 
-    # 写入配置文件 (ingress 直连 Subconverter 内部端口)
-    mkdir -p /etc/cloudflared
-    cat > "$CF_CONFIG" <<EOF
-tunnel: ${uuid}
-credentials-file: ${cred_file}
-
-ingress:
-  - hostname: ${REPLY_HOST}
-    service: http://localhost:${SUB_INTERNAL_PORT}
-  - service: http_status:404
-EOF
-    msg_ok "配置已写入 ${CF_CONFIG}"
-
-    # 为域名添加隧道 DNS 记录
-    msg_info "绑定 DNS 记录: ${REPLY_HOST} -> 隧道 ..."
-    local dns_out
-    if dns_out="$(cloudflared tunnel route dns "$TUNNEL_NAME" "$REPLY_HOST" 2>&1)"; then
-        msg_ok "DNS 记录已添加"
-    else
-        msg_warn "DNS 记录添加失败: ${dns_out}"
-        msg_info "常见原因: 该主机名已有旧 A 记录. 请到 Cloudflare 控制台 DNS 页面删除旧记录后重试"
-        return 1
-    fi
-
-    # 注册为开机自启服务并启动 (保留真实报错, 不再丢弃 stderr)
-    msg_info "安装 cloudflared 系统服务 ..."
+    # 以 Token 注册系统服务并启动 (隧道路由与 DNS 由控制台托管, 本机无需 config.yml)
+    msg_info "安装 cloudflared 系统服务 (Token 模式) ..."
     local svc_out
-    svc_out="$(cloudflared service install 2>&1)" || msg_warn "service install 返回异常: ${svc_out}"
+    svc_out="$(cloudflared service install "$REPLY_TOKEN" 2>&1)" \
+        || { msg_err "${svc_out}"; die "cloudflared 服务安装失败, 请检查 Token 是否正确复制 (完整无空格)"; }
     if ! systemctl restart cloudflared; then
         msg_err "cloudflared 服务启动失败, 最近日志:"
         journalctl -u cloudflared -n 15 --no-pager 2>/dev/null
         die "排查建议: systemctl status cloudflared / journalctl -u cloudflared -n 30"
     fi
+    systemctl enable cloudflared >/dev/null 2>&1
     msg_ok "cloudflared 服务已运行"
+
+    # 记录对外域名 (供菜单 2 状态显示 / 菜单 10 重启后验证使用)
+    mkdir -p /etc/cloudflared
+    echo "$REPLY_HOST" > "$CF_HOST_FILE" || msg_warn "域名记录写入失败: ${CF_HOST_FILE} (不影响隧道运行, 仅影响状态显示)"
 
     # 端到端验证
     echo ""
@@ -495,24 +486,28 @@ EOF
     if [ -n "$version" ]; then
         msg_ok "HTTPS 接入成功: https://${REPLY_HOST}/version -> 后端版本 ${version}"
     else
-        msg_warn "验证暂未通过 (DNS 生效或隧道建立可能有延迟, 稍后再试)"
+        msg_warn "验证暂未通过 (请确认控制台 Public Hostname 已指向 http://localhost:${SUB_INTERNAL_PORT}, DNS 生效可能有延迟)"
         msg_info "排查: systemctl status cloudflared / journalctl -u cloudflared -n 30"
     fi
     echo ""
     msg_ok "配置完成! 订阅转换地址:"
     msg_info "https://${REPLY_HOST}/sub?target=clash&url=<订阅链接>"
     msg_info "Tunnel 纯出站连接, 不占用本机端口; 全程 HTTPS 加密"
+    msg_info "隧道的改名/删除/路由调整请在 Cloudflare 控制台 Tunnels 页面操作"
 }
 
-# 读取已配置的 Tunnel 主机名 (无配置返回空)
+# 读取已配置的 Tunnel 主机名 (config.yml 模式解析 hostname, Token 模式读记录文件; 无配置返回空)
 get_tunnel_host() {
-    [ -f "$CF_CONFIG" ] || return 0
-    sed -n 's/^[[:space:]]*hostname:[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$CF_CONFIG" | head -n 1
+    if [ -f "$CF_CONFIG" ]; then
+        sed -n 's/^[[:space:]]*hostname:[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$CF_CONFIG" | head -n 1
+    elif [ -f "$CF_HOST_FILE" ]; then
+        head -n 1 "$CF_HOST_FILE" | tr -d '[:space:]'
+    fi
 }
 
 # Tunnel 运行状态摘要 (供 do_status 调用, 未配置则静默跳过)
 tunnel_status_line() {
-    [ -f "$CF_CONFIG" ] || return 0
+    tunnel_configured || return 0
     local host state
     host="$(get_tunnel_host)"
     if systemctl is-active --quiet cloudflared 2>/dev/null; then
@@ -525,7 +520,7 @@ tunnel_status_line() {
 
 # 选项 10: 重启 Cloudflare Tunnel 隧道服务
 do_restart_tunnel() {
-    if [ ! -f "$CF_CONFIG" ]; then
+    if ! tunnel_configured; then
         msg_err "尚未配置 Cloudflare Tunnel, 请先执行选项 9"
         return 1
     fi
@@ -675,8 +670,8 @@ do_status() {
 # 选项 6: 修改配置 (NAT 监听端口 / 绑定域名)
 do_modify() {
     if [ ! -f "$NGINX_CONF" ]; then
-        if [ -f "$CF_CONFIG" ]; then
-            msg_err "当前为 Cloudflare Tunnel 模式, 无 Nginx 配置可改; 修改域名请使用菜单 9 重新配置"
+        if tunnel_configured; then
+            msg_err "当前为 Cloudflare Tunnel 模式, 无 Nginx 配置可改; 修改域名请在 Cloudflare 控制台调整 Public Hostname 后使用菜单 9 重新配置"
         else
             msg_err "尚未安装本套件, 请先执行安装 (选项 1)"
         fi
@@ -718,10 +713,10 @@ do_uninstall() {
     esac
     systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1
     systemctl disable --now nginx >/dev/null 2>&1
-    if [ -f "$CF_CONFIG" ] || command -v cloudflared >/dev/null 2>&1; then
+    if tunnel_configured || command -v cloudflared >/dev/null 2>&1; then
         systemctl disable --now cloudflared >/dev/null 2>&1
         cloudflared service uninstall >/dev/null 2>&1
-        rm -f "$CF_CONFIG"
+        rm -f "$CF_CONFIG" "$CF_HOST_FILE"
         msg_ok "已清理 Tunnel 本地配置 (云端隧道如不再使用, 请到 Cloudflare 控制台删除)"
     fi
     rm -rf "$INSTALL_DIR"
@@ -822,7 +817,7 @@ show_menu() {
     echo " 6.  修改配置 (NAT监听端口 / 绑定域名)"
     echo " 7.  一键完全卸载 (清理所有文件与配置)"
     echo " 8.  更新 Subconverter 程序"
-    echo " 9.  配置 Cloudflare Tunnel (HTTPS 加密访问)"
+    echo " 9.  配置 Cloudflare Tunnel (Token 手动接入 HTTPS)"
     echo " 10. 重启 Cloudflare Tunnel 隧道"
     echo " 0.  退出脚本"
     echo "=================================================="
