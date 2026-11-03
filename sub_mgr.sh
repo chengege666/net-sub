@@ -476,8 +476,8 @@ do_tunnel() {
     echo ""
     msg_info "第二步 (回到控制台完成):"
     msg_info "  在刚创建的隧道 -> Public Hostname 页面添加:"
-    msg_info "    主机名: ${REPLY_HOST}"
-    msg_info "    Service 类型: HTTP    URL: localhost:${SUB_INTERNAL_PORT}"
+    msg_info "    主机名: ${REPLY_HOST}  填域名前缀：${REPLY_HOST%%.*}"
+    msg_info "    Service 类型: HTTP    URL:http://localhost:${SUB_INTERNAL_PORT}"
     msg_info "  (保存后控制台会自动添加该域名的 DNS 记录)"
     echo ""
     read -r -p "完成上述配置后按回车开始验证 ..." _
