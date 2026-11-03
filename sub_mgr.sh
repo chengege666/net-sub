@@ -431,11 +431,10 @@ do_tunnel() {
         rm -f "$NGINX_CONF" "${NGINX_CONF}.bak"
     fi
     echo ""
-    msg_info "请先在 Cloudflare 控制台完成以下手动操作:"
-    msg_info "  1) 打开 https://one.dash.cloudflare.com/ -> Networks -> Tunnels -> Create a tunnel"
-    msg_info "  2) 类型选 cloudflared, 命名后, 复制安装命令中的 Token (eyJ 开头的一长串字符)"
-    msg_info "  3) 在 Public Hostname 页面添加: 子域名 + 域名, Service 选 HTTP, URL 填 localhost:${SUB_INTERNAL_PORT}"
-    msg_info "     (该步骤会自动添加 DNS 记录, 无需脚本绑定)"
+    msg_info "第一步 (先在控制台完成):"
+    msg_info "  打开 https://one.dash.cloudflare.com/ -> Networks -> Tunnels -> Create a tunnel"
+    msg_info "  类型选 cloudflared, 命名后, 复制安装命令中的 Token (eyJ 开头的一长串字符)"
+    msg_info "  (Public Hostname 域名指向先不用填, 待服务启动后本向导会提示配置)"
     echo ""
     msg_warn "重要: Tunnel 会接管您所填域名的全部解析流量!"
     msg_warn "若该子域名同时被您的节点服务使用 (如节点 over WebSocket+TLS 也解析到此域名),"
@@ -472,6 +471,16 @@ do_tunnel() {
     fi
     systemctl enable cloudflared >/dev/null 2>&1
     msg_ok "cloudflared 服务已运行"
+
+    # 服务已启动, 引导用户回控制台配置 Public Hostname (域名 -> 后端内部端口)
+    echo ""
+    msg_info "第二步 (回到控制台完成):"
+    msg_info "  在刚创建的隧道 -> Public Hostname 页面添加:"
+    msg_info "    主机名: ${REPLY_HOST}"
+    msg_info "    Service 类型: HTTP    URL: localhost:${SUB_INTERNAL_PORT}"
+    msg_info "  (保存后控制台会自动添加该域名的 DNS 记录)"
+    echo ""
+    read -r -p "完成上述配置后按回车开始验证 ..." _
 
     # 记录对外域名 (供菜单 2 状态显示 / 菜单 10 重启后验证使用)
     mkdir -p /etc/cloudflared
